@@ -25,6 +25,78 @@ async function supabase(path, options = {}) {
 }
 
 // ============================================================
+// SUBMIT QUEUE SYSTEM
+// Antrian submit untuk mencegah overload saat banyak siswa
+// submit bersamaan
+// ============================================================
+const submitQueue = {
+  queue: [],
+  running: false,
+  maxRetry: 5,
+  baseDelay: 500, // ms
+
+  add(fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject, retries: 0 });
+      this.process();
+    });
+  },
+
+  async process() {
+    if (this.running || this.queue.length === 0) return;
+    this.running = true;
+    const item = this.queue.shift();
+    try {
+      const result = await this.runWithRetry(item);
+      item.resolve(result);
+    } catch (err) {
+      item.reject(err);
+    }
+    this.running = false;
+    // Jeda antar submit untuk hindari burst ke Supabase
+    await new Promise(r => setTimeout(r, 200));
+    this.process();
+  },
+
+  async runWithRetry(item) {
+    for (let attempt = 0; attempt <= this.maxRetry; attempt++) {
+      try {
+        return await item.fn();
+      } catch (err) {
+        if (attempt === this.maxRetry) throw err;
+        // Exponential backoff: 500ms, 1s, 2s, 4s, 8s
+        const delay = this.baseDelay * Math.pow(2, attempt);
+        const jitter = Math.random() * 300; // acak sedikit agar tidak semua retry bersamaan
+        await new Promise(r => setTimeout(r, delay + jitter));
+      }
+    }
+  }
+};
+
+// ============================================================
+// SHUFFLE UTILS
+// ============================================================
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Acak soal DAN opsi jawaban, kembalikan soal dengan mapping jawaban benar
+function shuffleSoalDanOpsi(soalAsli) {
+  const soalAcak = shuffleArray(soalAsli);
+  return soalAcak.map(s => {
+    const jawabanAsli = s.opsi[s.jawaban];
+    const opsiAcak = shuffleArray(s.opsi);
+    const jawabanBaru = opsiAcak.indexOf(jawabanAsli);
+    return { ...s, opsi: opsiAcak, jawaban: jawabanBaru };
+  });
+}
+
+// ============================================================
 // CONSTANTS
 // ============================================================
 const MAPEL = [
@@ -335,6 +407,19 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
       if (!ujian || !ujian.soal || ujian.soal.length === 0) {
         setError("Kode ujian tidak ditemukan atau ujian tidak aktif.");
       } else {
+        // Cek jadwal jam buka/tutup
+        if (ujian.jam_buka || ujian.jam_tutup) {
+          const now = new Date();
+          const toDate = (t) => { const [h,m] = t.split(":"); const d = new Date(); d.setHours(Number(h), Number(m), 0); return d; };
+          if (ujian.jam_buka && now < toDate(ujian.jam_buka)) {
+            setLoading(false);
+            return setError(`⏰ Ujian belum dibuka. Ujian dibuka pukul ${ujian.jam_buka}.`);
+          }
+          if (ujian.jam_tutup && now > toDate(ujian.jam_tutup)) {
+            setLoading(false);
+            return setError(`⏰ Waktu ujian sudah berakhir pukul ${ujian.jam_tutup}.`);
+          }
+        }
         onStudentJoin({ ujian, siswa: { nama: form.nama, kelas: form.kelas } });
       }
     } catch (e) {
@@ -504,7 +589,7 @@ function DashboardPage({ ujianList, hasilList }) {
 function UjianPage({ ujianList, onRefresh }) {
   const [showForm, setShowForm] = useState(false);
   const [showKey, setShowKey] = useState(null);
-  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "X", durasi: 60 });
+  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "X", durasi: 60, jam_buka: "", jam_tutup: "" });
   const [saving, setSaving] = useState(false);
 
   const handleCreate = async () => {
@@ -515,11 +600,11 @@ function UjianPage({ ujianList, onRefresh }) {
         newUjian.id = Date.now();
         DEMO_UJIAN.push(newUjian);
       } else {
-        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), key: newUjian.key, aktif: true }) });
+        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), key: newUjian.key, aktif: true, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
       }
       await onRefresh();
       setShowForm(false);
-      setForm({ mapel: MAPEL[0], kelas: "X", durasi: 60 });
+      setForm({ mapel: MAPEL[0], kelas: "X", durasi: 60, jam_buka: "", jam_tutup: "" });
     } catch(e) { alert("Gagal membuat ujian: " + e.message); }
     setSaving(false);
   };
@@ -534,6 +619,15 @@ function UjianPage({ ujianList, onRefresh }) {
       }
       await onRefresh();
     } catch(e) { alert("Gagal update: " + e.message); }
+  };
+
+  const getJadwalStatus = (u) => {
+    if (!u.jam_buka && !u.jam_tutup) return null;
+    const now = new Date();
+    const pad = (t) => { const [h,m] = t.split(":"); const d = new Date(); d.setHours(h,m,0); return d; };
+    if (u.jam_buka && now < pad(u.jam_buka)) return { label: `Buka ${u.jam_buka}`, color: "badge-yellow" };
+    if (u.jam_tutup && now > pad(u.jam_tutup)) return { label: `Tutup ${u.jam_tutup}`, color: "badge-red" };
+    return { label: `Buka s/d ${u.jam_tutup||"∞"}`, color: "badge-green" };
   };
 
   return (
@@ -554,8 +648,19 @@ function UjianPage({ ujianList, onRefresh }) {
                   {MAPEL.map(m => <option key={m}>{m}</option>)}
                 </select>
               </div>
-              <div className="form-field"><label>Kelas</label><input value={form.kelas} onChange={e => setForm(p=>({...p, kelas:e.target.value}))} placeholder="X IPA 1" /></div>
+              <div className="form-field"><label>Kelas</label><input value={form.kelas} onChange={e => setForm(p=>({...p, kelas:e.target.value}))} placeholder="VII A" /></div>
               <div className="form-field"><label>Durasi (menit)</label><input type="number" value={form.durasi} onChange={e => setForm(p=>({...p, durasi:e.target.value}))} /></div>
+              <div className="form-field">
+                <label>⏰ Jam Buka (opsional)</label>
+                <input type="time" value={form.jam_buka} onChange={e => setForm(p=>({...p, jam_buka:e.target.value}))} />
+              </div>
+              <div className="form-field">
+                <label>⏰ Jam Tutup (opsional)</label>
+                <input type="time" value={form.jam_tutup} onChange={e => setForm(p=>({...p, jam_tutup:e.target.value}))} />
+              </div>
+            </div>
+            <div style={{background:"var(--yellow3)", borderRadius:"8px", padding:"10px 14px", fontSize:"12px", marginBottom:"16px", color:"#92400e"}}>
+              💡 Jam Buka/Tutup bersifat opsional. Jika diisi, siswa hanya bisa masuk dalam rentang waktu tersebut.
             </div>
             <div style={{display:"flex", gap:"8px"}}>
               <button className="btn btn-green" onClick={handleCreate} disabled={saving}>{saving?"Menyimpan...":"✅ Simpan Ujian"}</button>
@@ -564,25 +669,30 @@ function UjianPage({ ujianList, onRefresh }) {
           </div>
         )}
         <div className="ujian-grid">
-          {ujianList.map(u => (
-            <div key={u.id} className="ujian-card">
-              <h3>{u.mapel}</h3>
-              <div className="meta">Kelas {u.kelas} • {u.durasi} menit • {(u.soal||[]).length} soal</div>
-              <div className="key-badge">{u.key}</div>
-              <div className="actions">
-                <button className="btn btn-blue" onClick={() => setShowKey(u)}>🔑 Lihat Kode</button>
-                <button className={`btn ${u.aktif ? "btn-red" : "btn-green"}`} onClick={() => toggleAktif(u)}>{u.aktif ? "⏸ Nonaktif" : "▶ Aktifkan"}</button>
+          {ujianList.map(u => {
+            const jadwal = getJadwalStatus(u);
+            return (
+              <div key={u.id} className="ujian-card">
+                <h3>{u.mapel}</h3>
+                <div className="meta">Kelas {u.kelas} • {u.durasi} menit • {(u.soal||[]).length} soal</div>
+                {u.jam_buka && <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"4px"}}>⏰ {u.jam_buka} – {u.jam_tutup||"∞"}</div>}
+                {jadwal && <span className={`badge ${jadwal.color}`} style={{marginBottom:"8px", display:"inline-block"}}>{jadwal.label}</span>}
+                <div className="key-badge">{u.key}</div>
+                <div className="actions">
+                  <button className="btn btn-blue" onClick={() => setShowKey(u)}>🔑 Kode</button>
+                  <button className={`btn ${u.aktif ? "btn-red" : "btn-green"}`} onClick={() => toggleAktif(u)}>{u.aktif ? "⏸ Nonaktif" : "▶ Aktif"}</button>
+                </div>
               </div>
-            </div>
-          ))}
-          {ujianList.length === 0 && <div className="empty-state"><div className="icon">📋</div><p>Belum ada ujian. Buat ujian pertama Anda!</p></div>}
+            );
+          })}
+          {ujianList.length === 0 && <div className="empty-state"><div className="icon">📋</div><p>Belum ada ujian.</p></div>}
         </div>
       </div>
       {showKey && (
         <div className="modal-overlay" onClick={() => setShowKey(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h2>🔑 Kode Ujian</h2>
-            <p>Bagikan kode ini kepada siswa untuk memulai ujian {showKey.mapel}</p>
+            <p>Bagikan kode ini kepada siswa untuk ujian {showKey.mapel}</p>
             <div className="exam-key-display">
               <div className="key">{showKey.key}</div>
               <p>Kelas {showKey.kelas} • {showKey.durasi} menit</p>
@@ -603,6 +713,10 @@ function SoalPage({ ujianList, onRefresh }) {
   const [soalList, setSoalList] = useState([]);
   const [form, setForm] = useState({ pertanyaan: "", opsi: ["","","",""], jawaban: 0 });
   const [saving, setSaving] = useState(false);
+  const [uploadMode, setUploadMode] = useState("manual"); // manual | excel | word
+  const [uploadStatus, setUploadStatus] = useState("");
+  const [previewSoal, setPreviewSoal] = useState([]);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     if (selectedUjian) {
@@ -645,6 +759,159 @@ function SoalPage({ ujianList, onRefresh }) {
     } catch(e) { alert("Gagal hapus: " + e.message); }
   };
 
+  // ── EXCEL PARSER ──────────────────────────────────────────
+  const parseExcel = (file) => {
+    setUploadStatus("⏳ Membaca file Excel...");
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        // Manual CSV-like parsing for simple xlsx (read as binary)
+        // We use SheetJS via CDN loaded dynamically
+        if (window.XLSX) {
+          const wb = window.XLSX.read(data, { type: "array" });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+          const parsed = parseRowsToSoal(rows);
+          if (parsed.length === 0) {
+            setUploadStatus("❌ Tidak ada soal yang terbaca. Pastikan format sesuai template.");
+          } else {
+            setPreviewSoal(parsed);
+            setUploadStatus(`✅ Berhasil membaca ${parsed.length} soal. Cek preview lalu klik Import.`);
+          }
+        } else {
+          setUploadStatus("❌ Library Excel belum siap. Refresh halaman dan coba lagi.");
+        }
+      } catch(err) {
+        setUploadStatus("❌ Gagal membaca file: " + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // ── WORD PARSER ───────────────────────────────────────────
+  const parseWord = (file) => {
+    setUploadStatus("⏳ Membaca file Word...");
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        if (window.mammoth) {
+          window.mammoth.extractRawText({ arrayBuffer: e.target.result })
+            .then(result => {
+              const text = result.value;
+              const parsed = parseTextToSoal(text);
+              if (parsed.length === 0) {
+                setUploadStatus("❌ Tidak ada soal yang terbaca. Pastikan format sesuai template.");
+              } else {
+                setPreviewSoal(parsed);
+                setUploadStatus(`✅ Berhasil membaca ${parsed.length} soal. Cek preview lalu klik Import.`);
+              }
+            });
+        } else {
+          setUploadStatus("❌ Library Word belum siap. Refresh halaman dan coba lagi.");
+        }
+      } catch(err) {
+        setUploadStatus("❌ Gagal membaca file: " + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // Parse baris Excel → array soal
+  // Format: Kolom A=Pertanyaan, B=Opsi A, C=Opsi B, D=Opsi C, E=Opsi D, F=Jawaban Benar (A/B/C/D)
+  const parseRowsToSoal = (rows) => {
+    const hasil = [];
+    for (let i = 1; i < rows.length; i++) { // skip header baris 0
+      const row = rows[i];
+      const pertanyaan = String(row[0] || "").trim();
+      const opsiA = String(row[1] || "").trim();
+      const opsiB = String(row[2] || "").trim();
+      const opsiC = String(row[3] || "").trim();
+      const opsiD = String(row[4] || "").trim();
+      const jwbRaw = String(row[5] || "").trim().toUpperCase();
+      if (!pertanyaan || !opsiA) continue;
+      const jwbMap = { "A":0, "B":1, "C":2, "D":3 };
+      const jawaban = jwbMap[jwbRaw] ?? 0;
+      hasil.push({ id: Date.now() + i, pertanyaan, opsi: [opsiA, opsiB, opsiC, opsiD], jawaban });
+    }
+    return hasil;
+  };
+
+  // Parse teks Word → array soal
+  // Format: 1. Pertanyaan\nA. Opsi A\nB. Opsi B\nC. Opsi C\nD. Opsi D\nJawaban: A
+  const parseTextToSoal = (text) => {
+    const hasil = [];
+    const blocks = text.split(/\n(?=\d+[\.\)])/);
+    for (const block of blocks) {
+      const lines = block.split("\n").map(l => l.trim()).filter(Boolean);
+      if (lines.length < 5) continue;
+      const pertanyaan = lines[0].replace(/^\d+[\.\)]\s*/, "").trim();
+      const opsi = [];
+      let jawaban = 0;
+      for (let i = 1; i < lines.length; i++) {
+        const match = lines[i].match(/^([A-D])[\.\)]\s*(.+)/i);
+        if (match) opsi.push(match[2].trim());
+        const jwbMatch = lines[i].match(/^[Jj]awaban\s*:\s*([A-D])/i);
+        if (jwbMatch) jawaban = ["A","B","C","D"].indexOf(jwbMatch[1].toUpperCase());
+      }
+      if (pertanyaan && opsi.length >= 2) {
+        while (opsi.length < 4) opsi.push("-");
+        hasil.push({ id: Date.now() + hasil.length, pertanyaan, opsi: opsi.slice(0,4), jawaban });
+      }
+    }
+    return hasil;
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setPreviewSoal([]);
+    setUploadStatus("");
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (ext === "xlsx" || ext === "xls") parseExcel(file);
+    else if (ext === "docx") parseWord(file);
+    else setUploadStatus("❌ Format tidak didukung. Gunakan .xlsx atau .docx");
+    e.target.value = "";
+  };
+
+  const handleImport = async () => {
+    if (!selectedUjian) return alert("Pilih ujian terlebih dahulu.");
+    if (previewSoal.length === 0) return;
+    setImporting(true);
+    let berhasil = 0;
+    try {
+      for (const s of previewSoal) {
+        if (useDemo) {
+          const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
+          if (idx > -1) DEMO_UJIAN[idx].soal = [...(DEMO_UJIAN[idx].soal||[]), s];
+        } else {
+          await supabase("soal", { method: "POST", body: JSON.stringify({ ujian_id: Number(selectedUjian), pertanyaan: s.pertanyaan, opsi: s.opsi, jawaban: s.jawaban }) });
+        }
+        berhasil++;
+      }
+      await onRefresh();
+      setPreviewSoal([]);
+      setUploadStatus(`🎉 ${berhasil} soal berhasil diimport!`);
+    } catch(e) {
+      setUploadStatus(`❌ Gagal import soal ke-${berhasil+1}: ${e.message}`);
+    }
+    setImporting(false);
+  };
+
+  // Load libraries dynamically
+  useEffect(() => {
+    if (!window.XLSX) {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      document.head.appendChild(s);
+    }
+    if (!window.mammoth) {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js";
+      document.head.appendChild(s);
+    }
+  }, []);
+
   const HURUF = ["A","B","C","D"];
 
   return (
@@ -662,27 +929,151 @@ function SoalPage({ ujianList, onRefresh }) {
 
       {selectedUjian && (
         <>
-          <div className="card">
-            <div className="card-header"><h2>✏️ Tambah Soal Baru</h2><span className="badge badge-blue">{soalList.length} soal</span></div>
-            <div className="form-field">
-              <label>Pertanyaan</label>
-              <textarea value={form.pertanyaan} onChange={e => setForm(p=>({...p, pertanyaan:e.target.value}))} placeholder="Tulis pertanyaan di sini..." rows={3} />
-            </div>
-            <label style={{fontSize:"13px", fontWeight:"700", color:"var(--navy3)", display:"block", marginBottom:"10px"}}>Pilihan Jawaban <span style={{color:"var(--green)", fontWeight:"600"}}>(✓ = Jawaban Benar)</span></label>
-            {HURUF.map((h,i) => (
-              <div key={i} className={`option-row ${form.jawaban === i ? "correct" : ""}`}>
-                <div className="option-label">{h}</div>
-                <input value={form.opsi[i]} onChange={e => { const o = [...form.opsi]; o[i] = e.target.value; setForm(p=>({...p, opsi:o})); }} placeholder={`Opsi ${h}`} />
-                <button className={`btn ${form.jawaban === i ? "btn-green" : "btn-ghost"}`} onClick={() => setForm(p=>({...p, jawaban:i}))}>✓</button>
-              </div>
-            ))}
-            <div style={{marginTop:"16px"}}>
-              <button className="btn btn-blue" onClick={handleSave} disabled={saving}>{saving?"Menyimpan...":"💾 Simpan Soal"}</button>
+          {/* Tab pilih mode input */}
+          <div className="card" style={{padding:"16px"}}>
+            <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+              {[["manual","✏️ Input Manual"],["excel","📊 Upload Excel"],["word","📄 Upload Word"]].map(([m,l]) => (
+                <button key={m} className={`btn ${uploadMode===m?"btn-blue":"btn-ghost"}`} onClick={() => { setUploadMode(m); setPreviewSoal([]); setUploadStatus(""); }}>{l}</button>
+              ))}
             </div>
           </div>
 
+          {/* MODE: MANUAL */}
+          {uploadMode === "manual" && (
+            <div className="card">
+              <div className="card-header"><h2>✏️ Tambah Soal Manual</h2><span className="badge badge-blue">{soalList.length} soal</span></div>
+              <div className="form-field">
+                <label>Pertanyaan</label>
+                <textarea value={form.pertanyaan} onChange={e => setForm(p=>({...p, pertanyaan:e.target.value}))} placeholder="Tulis pertanyaan di sini..." rows={3} />
+              </div>
+              <label style={{fontSize:"13px", fontWeight:"700", color:"var(--navy3)", display:"block", marginBottom:"10px"}}>Pilihan Jawaban <span style={{color:"var(--green)", fontWeight:"600"}}>(✓ = Jawaban Benar)</span></label>
+              {HURUF.map((h,i) => (
+                <div key={i} className={`option-row ${form.jawaban === i ? "correct" : ""}`}>
+                  <div className="option-label">{h}</div>
+                  <input value={form.opsi[i]} onChange={e => { const o = [...form.opsi]; o[i] = e.target.value; setForm(p=>({...p, opsi:o})); }} placeholder={`Opsi ${h}`} />
+                  <button className={`btn ${form.jawaban === i ? "btn-green" : "btn-ghost"}`} onClick={() => setForm(p=>({...p, jawaban:i}))}>✓</button>
+                </div>
+              ))}
+              <div style={{marginTop:"16px"}}>
+                <button className="btn btn-blue" onClick={handleSave} disabled={saving}>{saving?"Menyimpan...":"💾 Simpan Soal"}</button>
+              </div>
+            </div>
+          )}
+
+          {/* MODE: EXCEL */}
+          {uploadMode === "excel" && (
+            <div className="card">
+              <div className="card-header"><h2>📊 Upload Soal dari Excel</h2></div>
+              {/* Panduan format */}
+              <div style={{background:"var(--blue3)", borderRadius:"var(--radius2)", padding:"16px", marginBottom:"20px"}}>
+                <div style={{fontSize:"13px", fontWeight:"700", color:"var(--blue2)", marginBottom:"8px"}}>📋 Format Excel yang Harus Digunakan:</div>
+                <div style={{fontSize:"12px", color:"var(--navy3)", lineHeight:"1.8"}}>
+                  <strong>Baris 1 (Header):</strong> Pertanyaan | Opsi A | Opsi B | Opsi C | Opsi D | Jawaban<br/>
+                  <strong>Baris 2 dst (Soal):</strong> Isi pertanyaan | Opsi A | Opsi B | Opsi C | Opsi D | A/B/C/D<br/>
+                  <strong>Kolom Jawaban:</strong> isi huruf A, B, C, atau D (huruf kapital)
+                </div>
+                <div style={{marginTop:"10px", fontSize:"12px", background:"white", borderRadius:"6px", padding:"10px", fontFamily:"var(--mono)"}}>
+                  <div style={{color:"var(--gray)", borderBottom:"1px solid var(--border)", paddingBottom:"4px", marginBottom:"4px"}}>Pertanyaan | Opsi A | Opsi B | Opsi C | Opsi D | Jawaban</div>
+                  <div>Ibu kota Indonesia? | Jakarta | Bandung | Surabaya | Medan | A</div>
+                  <div>2 + 2 = ? | 3 | 4 | 5 | 6 | B</div>
+                </div>
+              </div>
+              <div style={{border:"2px dashed var(--blue)", borderRadius:"var(--radius)", padding:"32px", textAlign:"center"}}>
+                <div style={{fontSize:"36px", marginBottom:"8px"}}>📊</div>
+                <div style={{fontSize:"14px", fontWeight:"600", marginBottom:"4px"}}>Pilih file Excel (.xlsx)</div>
+                <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"16px"}}>Format .xlsx atau .xls</div>
+                <label className="btn btn-blue" style={{cursor:"pointer"}}>
+                  📂 Pilih File Excel
+                  <input type="file" accept=".xlsx,.xls" onChange={handleFileUpload} style={{display:"none"}} />
+                </label>
+              </div>
+              {uploadStatus && (
+                <div style={{marginTop:"12px", padding:"12px 16px", borderRadius:"var(--radius2)", background: uploadStatus.startsWith("✅")||uploadStatus.startsWith("🎉") ? "var(--green3)" : uploadStatus.startsWith("⏳") ? "var(--yellow3)" : "var(--red3)", fontSize:"14px", fontWeight:"500"}}>
+                  {uploadStatus}
+                </div>
+              )}
+              {previewSoal.length > 0 && (
+                <div style={{marginTop:"16px"}}>
+                  <div style={{fontSize:"14px", fontWeight:"700", marginBottom:"12px"}}>Preview {previewSoal.length} soal:</div>
+                  {previewSoal.slice(0,3).map((s,i) => (
+                    <div key={i} style={{border:"1px solid var(--border)", borderRadius:"var(--radius2)", padding:"12px", marginBottom:"8px", fontSize:"13px"}}>
+                      <div style={{fontWeight:"600", marginBottom:"6px"}}>Soal {i+1}: {s.pertanyaan}</div>
+                      <div style={{display:"flex", gap:"6px", flexWrap:"wrap"}}>
+                        {s.opsi.map((o,j) => <span key={j} style={{padding:"2px 8px", borderRadius:"99px", background: j===s.jawaban?"var(--green3)":"var(--light)", color: j===s.jawaban?"var(--green2)":"var(--gray)", fontSize:"12px"}}>{HURUF[j]}. {o}</span>)}
+                      </div>
+                    </div>
+                  ))}
+                  {previewSoal.length > 3 && <div style={{fontSize:"12px", color:"var(--gray)", textAlign:"center", marginBottom:"12px"}}>...dan {previewSoal.length-3} soal lainnya</div>}
+                  <button className="btn btn-green" style={{width:"100%", padding:"12px"}} onClick={handleImport} disabled={importing}>
+                    {importing ? "⏳ Mengimport..." : `🚀 Import ${previewSoal.length} Soal ke Ujian`}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* MODE: WORD */}
+          {uploadMode === "word" && (
+            <div className="card">
+              <div className="card-header"><h2>📄 Upload Soal dari Word</h2></div>
+              {/* Panduan format */}
+              <div style={{background:"var(--blue3)", borderRadius:"var(--radius2)", padding:"16px", marginBottom:"20px"}}>
+                <div style={{fontSize:"13px", fontWeight:"700", color:"var(--blue2)", marginBottom:"8px"}}>📋 Format Word yang Harus Digunakan:</div>
+                <div style={{fontSize:"12px", color:"var(--navy3)", lineHeight:"1.8", marginBottom:"10px"}}>
+                  Tulis soal dengan format berikut, satu soal per blok:
+                </div>
+                <div style={{fontSize:"12px", background:"white", borderRadius:"6px", padding:"12px", fontFamily:"var(--mono)", lineHeight:"1.8"}}>
+                  <div>1. Ibu kota Indonesia adalah?</div>
+                  <div>A. Bandung</div>
+                  <div>B. Jakarta</div>
+                  <div>C. Surabaya</div>
+                  <div>D. Medan</div>
+                  <div style={{color:"var(--green2)", fontWeight:"700"}}>Jawaban: B</div>
+                  <div style={{color:"var(--gray)", margin:"4px 0"}}>---</div>
+                  <div>2. 2 + 2 sama dengan?</div>
+                  <div>A. 3</div>
+                  <div>B. 5</div>
+                  <div>C. 4</div>
+                  <div>D. 6</div>
+                  <div style={{color:"var(--green2)", fontWeight:"700"}}>Jawaban: C</div>
+                </div>
+              </div>
+              <div style={{border:"2px dashed var(--green)", borderRadius:"var(--radius)", padding:"32px", textAlign:"center"}}>
+                <div style={{fontSize:"36px", marginBottom:"8px"}}>📄</div>
+                <div style={{fontSize:"14px", fontWeight:"600", marginBottom:"4px"}}>Pilih file Word (.docx)</div>
+                <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"16px"}}>Format .docx (Microsoft Word 2007+)</div>
+                <label className="btn btn-green" style={{cursor:"pointer"}}>
+                  📂 Pilih File Word
+                  <input type="file" accept=".docx" onChange={handleFileUpload} style={{display:"none"}} />
+                </label>
+              </div>
+              {uploadStatus && (
+                <div style={{marginTop:"12px", padding:"12px 16px", borderRadius:"var(--radius2)", background: uploadStatus.startsWith("✅")||uploadStatus.startsWith("🎉") ? "var(--green3)" : uploadStatus.startsWith("⏳") ? "var(--yellow3)" : "var(--red3)", fontSize:"14px", fontWeight:"500"}}>
+                  {uploadStatus}
+                </div>
+              )}
+              {previewSoal.length > 0 && (
+                <div style={{marginTop:"16px"}}>
+                  <div style={{fontSize:"14px", fontWeight:"700", marginBottom:"12px"}}>Preview {previewSoal.length} soal:</div>
+                  {previewSoal.slice(0,3).map((s,i) => (
+                    <div key={i} style={{border:"1px solid var(--border)", borderRadius:"var(--radius2)", padding:"12px", marginBottom:"8px", fontSize:"13px"}}>
+                      <div style={{fontWeight:"600", marginBottom:"6px"}}>Soal {i+1}: {s.pertanyaan}</div>
+                      <div style={{display:"flex", gap:"6px", flexWrap:"wrap"}}>
+                        {s.opsi.map((o,j) => <span key={j} style={{padding:"2px 8px", borderRadius:"99px", background: j===s.jawaban?"var(--green3)":"var(--light)", color: j===s.jawaban?"var(--green2)":"var(--gray)", fontSize:"12px"}}>{HURUF[j]}. {o}</span>)}
+                      </div>
+                    </div>
+                  ))}
+                  {previewSoal.length > 3 && <div style={{fontSize:"12px", color:"var(--gray)", textAlign:"center", marginBottom:"12px"}}>...dan {previewSoal.length-3} soal lainnya</div>}
+                  <button className="btn btn-green" style={{width:"100%", padding:"12px"}} onClick={handleImport} disabled={importing}>
+                    {importing ? "⏳ Mengimport..." : `🚀 Import ${previewSoal.length} Soal ke Ujian`}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="card">
-            <div className="card-header"><h2>📝 Daftar Soal</h2></div>
+            <div className="card-header"><h2>📝 Daftar Soal</h2><span className="badge badge-blue">{soalList.length} soal</span></div>
             {soalList.length === 0 ? (
               <div className="empty-state"><div className="icon">✏️</div><p>Belum ada soal. Tambahkan soal di atas.</p></div>
             ) : (
@@ -715,35 +1106,89 @@ function SoalPage({ ujianList, onRefresh }) {
 // ---- Hasil Ujian ----
 function HasilPage({ hasilList, ujianList }) {
   const [filter, setFilter] = useState("");
-  const filtered = filter ? hasilList.filter(h => h.mapel === filter) : hasilList;
+  const [tabView, setTabView] = useState("semua"); // semua | curiga
+  const filtered = hasilList.filter(h => {
+    const matchMapel = filter ? h.mapel === filter : true;
+    const matchTab = tabView === "curiga" ? h.mencurigakan : true;
+    return matchMapel && matchTab;
+  });
+  const curigaCount = hasilList.filter(h => h.mencurigakan).length;
+
+  const exportCSV = () => {
+    const rows = [
+      ["No","Nama","Kelas","Mata Pelajaran","Benar","Total","Nilai","Status","Pelanggaran","Mencurigakan"],
+      ...filtered.map((h,i) => [i+1, h.nama_siswa, h.kelas, h.mapel, h.benar, h.total, h.nilai, h.nilai>=75?"Lulus":"Remedi", h.pelanggaran||0, h.mencurigakan?"Ya":"Tidak"])
+    ];
+    const csv = rows.map(r => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `hasil-ujian-${filter||"semua"}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <>
-      <div className="page-header"><h1>Hasil Ujian</h1><p>Rekap nilai seluruh peserta</p></div>
+      <div className="page-header"><h1>Hasil Ujian</h1><p>Rekap nilai & deteksi kecurangan peserta</p></div>
+
+      {curigaCount > 0 && (
+        <div style={{background:"var(--red3)", border:"1px solid var(--red)", borderRadius:"var(--radius)", padding:"16px 20px", marginBottom:"20px", display:"flex", alignItems:"center", gap:"12px"}}>
+          <div style={{fontSize:"24px"}}>🚨</div>
+          <div>
+            <div style={{fontWeight:"700", color:"var(--red2)"}}>Terdeteksi {curigaCount} siswa mencurigakan!</div>
+            <div style={{fontSize:"13px", color:"var(--red2)", opacity:0.8}}>Siswa ini terdeteksi berpindah tab atau keluar fullscreen lebih dari 1 kali.</div>
+          </div>
+          <button className="btn btn-red" style={{marginLeft:"auto"}} onClick={() => setTabView("curiga")}>Lihat Detail</button>
+        </div>
+      )}
+
       <div className="card">
         <div className="card-header">
-          <h2>Rekap Nilai</h2>
-          <select value={filter} onChange={e => setFilter(e.target.value)} style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}}>
-            <option value="">Semua Mapel</option>
-            {MAPEL.map(m => <option key={m}>{m}</option>)}
-          </select>
+          <div style={{display:"flex", gap:"8px"}}>
+            <button className={`btn ${tabView==="semua"?"btn-blue":"btn-ghost"}`} onClick={() => setTabView("semua")}>📊 Semua ({hasilList.length})</button>
+            <button className={`btn ${tabView==="curiga"?"btn-red":"btn-ghost"}`} onClick={() => setTabView("curiga")}>🚨 Mencurigakan ({curigaCount})</button>
+          </div>
+          <div style={{display:"flex", gap:"8px"}}>
+            <select value={filter} onChange={e => setFilter(e.target.value)} style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}}>
+              <option value="">Semua Mapel</option>
+              {MAPEL.map(m => <option key={m}>{m}</option>)}
+            </select>
+            <button className="btn btn-green" onClick={exportCSV}>⬇️ Export CSV</button>
+          </div>
         </div>
+
         {filtered.length === 0 ? (
-          <div className="empty-state"><div className="icon">📊</div><p>Belum ada data hasil ujian</p></div>
+          <div className="empty-state"><div className="icon">📊</div><p>{tabView==="curiga" ? "Tidak ada siswa mencurigakan 🎉" : "Belum ada data hasil ujian"}</p></div>
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>#</th><th>Nama</th><th>Kelas</th><th>Mata Pelajaran</th><th>Benar</th><th>Total</th><th>Nilai</th><th>Status</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>#</th><th>Nama</th><th>Kelas</th><th>Mata Pelajaran</th>
+                  <th>Benar</th><th>Total</th><th>Nilai</th><th>Status</th>
+                  <th>Pelanggaran</th>
+                </tr>
+              </thead>
               <tbody>
                 {filtered.map((h,i) => (
-                  <tr key={i}>
+                  <tr key={i} style={{background: h.mencurigakan ? "#fff5f5" : ""}}>
                     <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
-                    <td><strong>{h.nama_siswa}</strong></td>
+                    <td>
+                      <strong>{h.nama_siswa}</strong>
+                      {h.mencurigakan && <span style={{marginLeft:"6px", fontSize:"11px", color:"var(--red2)", fontWeight:"700"}}>⚠️ Curiga</span>}
+                    </td>
                     <td>{h.kelas}</td>
                     <td>{h.mapel}</td>
                     <td style={{fontFamily:"var(--mono)"}}>{h.benar}</td>
                     <td style={{fontFamily:"var(--mono)"}}>{h.total}</td>
                     <td><strong style={{fontFamily:"var(--mono)", color: h.nilai >= 75 ? "var(--green2)" : "var(--red2)"}}>{h.nilai}</strong></td>
                     <td><span className={`badge ${h.nilai >= 75 ? "badge-green" : "badge-red"}`}>{h.nilai >= 75 ? "Lulus" : "Remedi"}</span></td>
+                    <td>
+                      {(h.pelanggaran||0) === 0
+                        ? <span style={{color:"var(--green2)", fontSize:"12px", fontWeight:"600"}}>✅ Bersih</span>
+                        : <span style={{color:"var(--red2)", fontSize:"12px", fontWeight:"700"}}>⚠️ {h.pelanggaran}x</span>
+                      }
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -760,13 +1205,98 @@ function HasilPage({ hasilList, ujianList }) {
 // ============================================================
 function StudentExam({ data, onFinish }) {
   const { ujian, siswa } = data;
-  const soal = ujian.soal;
+  // Acak soal dan opsi saat komponen pertama kali dimuat
+  const [soal] = useState(() => shuffleSoalDanOpsi(ujian.soal));
   const [current, setCurrent] = useState(0);
   const [jawaban, setJawaban] = useState(Array(soal.length).fill(null));
   const [timeLeft, setTimeLeft] = useState(ujian.durasi * 60);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showReview, setShowReview] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [tabViolation, setTabViolation] = useState(0);
+  const [showWarning, setShowWarning] = useState(false);
+  const [warningMsg, setWarningMsg] = useState("");
+  const [locked, setLocked] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitStatus, setSubmitStatus] = useState(""); // "", "queued", "saving", "done", "error"
+  const [queuePos, setQueuePos] = useState(null);
+  const MAX_VIOLATIONS = 3;
+
+  // ── Fullscreen ──────────────────────────────────────────────
+  const enterFullscreen = () => {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    setIsFullscreen(true);
+  };
 
   useEffect(() => {
+    enterFullscreen();
+    const onFsChange = () => {
+      const fs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      setIsFullscreen(fs);
+      if (!fs && !submitting) {
+        setTabViolation(v => {
+          const nv = v + 1;
+          if (nv >= MAX_VIOLATIONS) {
+            setLocked(true);
+            setWarningMsg(`🔒 Ujian dikunci! Anda keluar layar penuh ${nv}x. Hubungi pengawas.`);
+          } else {
+            setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Anda keluar dari layar penuh!`);
+          }
+          setShowWarning(true);
+          return nv;
+        });
+      }
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    document.addEventListener("webkitfullscreenchange", onFsChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFsChange);
+      document.removeEventListener("webkitfullscreenchange", onFsChange);
+    };
+  }, [submitting]);
+
+  // ── Deteksi pindah tab ──────────────────────────────────────
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden && !submitting) {
+        setTabViolation(v => {
+          const nv = v + 1;
+          if (nv >= MAX_VIOLATIONS) {
+            setLocked(true);
+            setWarningMsg(`🔒 Ujian dikunci! Anda berpindah tab ${nv}x. Hubungi pengawas.`);
+          } else {
+            setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Terdeteksi meninggalkan halaman ujian!`);
+          }
+          setShowWarning(true);
+          return nv;
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [submitting]);
+
+  // ── Blokir klik kanan & shortcut ───────────────────────────
+  useEffect(() => {
+    const block = e => e.preventDefault();
+    const blockKeys = e => {
+      if (e.ctrlKey && ["c","v","u","s","a","p"].includes(e.key.toLowerCase())) e.preventDefault();
+      if (e.key === "F12" || (e.ctrlKey && e.shiftKey && e.key === "I")) e.preventDefault();
+      if (e.key === "PrintScreen") e.preventDefault();
+    };
+    document.addEventListener("contextmenu", block);
+    document.addEventListener("keydown", blockKeys);
+    return () => {
+      document.removeEventListener("contextmenu", block);
+      document.removeEventListener("keydown", blockKeys);
+    };
+  }, []);
+
+  // ── Timer ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (locked || submitting) return;
     const t = setInterval(() => {
       setTimeLeft(prev => {
         if (prev <= 1) { clearInterval(t); handleSubmit(true); return 0; }
@@ -774,35 +1304,176 @@ function StudentExam({ data, onFinish }) {
       });
     }, 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [locked, submitting]);
 
+  // ── Submit dengan Antrian ───────────────────────────────────
   const handleSubmit = useCallback(async (auto = false) => {
+    if (submitting) return;
+    setSubmitting(true);
+    setShowConfirm(false);
+    setShowReview(false);
+
     const benar = soal.filter((s, i) => jawaban[i] === s.jawaban).length;
     const nilai = Math.round((benar / soal.length) * 100);
-    const hasilData = { nama_siswa: siswa.nama, kelas: siswa.kelas, mapel: ujian.mapel, benar, total: soal.length, nilai, ujian_id: ujian.id };
+    const hasilData = {
+      nama_siswa: siswa.nama, kelas: siswa.kelas, mapel: ujian.mapel,
+      benar, total: soal.length, nilai, ujian_id: ujian.id,
+      pelanggaran: tabViolation,
+      mencurigakan: tabViolation >= 2,
+    };
+
     try {
       if (useDemo) {
+        setSubmitStatus("saving");
+        await new Promise(r => setTimeout(r, 800));
         hasilData.id = Date.now();
         DEMO_HASIL.push(hasilData);
+        setSubmitStatus("done");
       } else {
-        await supabase("hasil", { method: "POST", body: JSON.stringify(hasilData) });
+        setSubmitStatus("queued");
+        // Masukkan ke antrian — otomatis retry jika gagal
+        await submitQueue.add(async () => {
+          setSubmitStatus("saving");
+          await supabase("hasil", {
+            method: "POST",
+            body: JSON.stringify(hasilData),
+          });
+        });
+        setSubmitStatus("done");
       }
-    } catch(e) { console.error("Gagal simpan hasil:", e); }
+    } catch(e) {
+      setSubmitStatus("error");
+      console.error("Gagal simpan hasil:", e);
+    }
+
+    if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
     onFinish({ ...hasilData });
-  }, [jawaban, soal, siswa, ujian, onFinish]);
+  }, [jawaban, soal, siswa, ujian, onFinish, tabViolation, submitting]);
 
   const HURUF = ["A","B","C","D"];
   const isDanger = timeLeft <= 300;
+  const dijawab = jawaban.filter(j => j !== null).length;
+  const belumDijawab = soal.length - dijawab;
+
+  // ── LOADING SCREEN saat submit ──────────────────────────────
+  if (submitting) {
+    return (
+      <div style={{minHeight:"100vh", background:"var(--navy)", display:"flex", alignItems:"center", justifyContent:"center"}}>
+        <div style={{textAlign:"center", color:"white", padding:"32px"}}>
+          <div style={{fontSize:"48px", marginBottom:"16px"}}>
+            {submitStatus === "queued" && "⏳"}
+            {submitStatus === "saving" && "💾"}
+            {submitStatus === "done" && "✅"}
+            {submitStatus === "error" && "❌"}
+          </div>
+          <h2 style={{fontSize:"20px", fontWeight:"800", marginBottom:"8px"}}>
+            {submitStatus === "queued" && "Menunggu antrian..."}
+            {submitStatus === "saving" && "Menyimpan jawaban..."}
+            {submitStatus === "done" && "Jawaban tersimpan!"}
+            {submitStatus === "error" && "Gagal menyimpan"}
+          </h2>
+          <p style={{color:"rgba(255,255,255,0.6)", fontSize:"14px"}}>
+            {submitStatus === "queued" && "Sedang banyak siswa submit. Harap tunggu, jawaban Anda aman."}
+            {submitStatus === "saving" && "Sedang mengirim ke server..."}
+            {submitStatus === "done" && "Menampilkan hasil..."}
+            {submitStatus === "error" && "Jawaban tetap tercatat. Menampilkan hasil..."}
+          </p>
+          {submitStatus === "queued" && (
+            <div style={{marginTop:"20px", background:"rgba(255,255,255,0.1)", borderRadius:"8px", padding:"12px", fontSize:"13px", color:"rgba(255,255,255,0.7)"}}>
+              💡 Server sedang memproses banyak pengiriman secara bersamaan. Sistem antrian memastikan jawaban Anda tidak hilang.
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── REVIEW SCREEN ───────────────────────────────────────────
+  if (showReview) {
+    return (
+      <div style={{minHeight:"100vh", background:"var(--light)", padding:"20px"}}>
+        <div style={{maxWidth:"800px", margin:"0 auto"}}>
+          <div style={{background:"var(--navy)", borderRadius:"var(--radius)", padding:"20px", marginBottom:"20px", display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+            <div>
+              <h2 style={{color:"white", fontSize:"18px", fontWeight:"800"}}>📋 Review Jawaban</h2>
+              <p style={{color:"rgba(255,255,255,0.6)", fontSize:"13px"}}>Periksa kembali sebelum dikumpulkan</p>
+            </div>
+            <div className={`cbt-timer ${isDanger ? "danger" : ""}`}>⏱ {formatTime(timeLeft)}</div>
+          </div>
+
+          {belumDijawab > 0 && (
+            <div style={{background:"var(--yellow3)", borderRadius:"var(--radius)", padding:"14px 18px", marginBottom:"16px", fontSize:"14px", color:"#92400e", fontWeight:"600"}}>
+              ⚠️ Masih ada {belumDijawab} soal yang belum dijawab!
+            </div>
+          )}
+
+          <div style={{display:"grid", gap:"10px", marginBottom:"20px"}}>
+            {soal.map((s, i) => (
+              <div key={i} style={{background:"white", borderRadius:"var(--radius2)", padding:"16px", border:`2px solid ${jawaban[i]===null ? "var(--red)" : "var(--border)"}`, cursor:"pointer"}} onClick={() => { setShowReview(false); setCurrent(i); }}>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"12px"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:"12px", fontWeight:"700", color:"var(--blue)", marginBottom:"4px"}}>Soal {i+1}</div>
+                    <div style={{fontSize:"14px", color:"var(--navy)", marginBottom:"8px"}}>{s.pertanyaan.length > 80 ? s.pertanyaan.slice(0,80)+"..." : s.pertanyaan}</div>
+                    {jawaban[i] !== null ? (
+                      <span style={{fontSize:"12px", padding:"3px 10px", borderRadius:"99px", background:"var(--blue3)", color:"var(--blue2)", fontWeight:"600"}}>
+                        Jawaban: {HURUF[jawaban[i]]}. {s.opsi[jawaban[i]]}
+                      </span>
+                    ) : (
+                      <span style={{fontSize:"12px", padding:"3px 10px", borderRadius:"99px", background:"var(--red3)", color:"var(--red2)", fontWeight:"600"}}>Belum dijawab</span>
+                    )}
+                  </div>
+                  <div style={{fontSize:"12px", color:"var(--gray)", flexShrink:0}}>Klik untuk edit</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{display:"flex", gap:"12px"}}>
+            <button className="btn btn-ghost" style={{flex:1, padding:"14px"}} onClick={() => setShowReview(false)}>← Kembali ke Soal</button>
+            <button className="btn btn-green" style={{flex:1, padding:"14px", fontSize:"15px", fontWeight:"700"}} onClick={() => setShowConfirm(true)}>
+              ✅ Kumpulkan Ujian
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="cbt-wrap">
+    <div className="cbt-wrap" style={{userSelect:"none"}}>
+      {/* Warning overlay */}
+      {showWarning && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
+          <div style={{background:"white",borderRadius:"16px",padding:"32px",maxWidth:"420px",textAlign:"center"}}>
+            <div style={{fontSize:"48px",marginBottom:"12px"}}>{locked ? "🔒" : "⚠️"}</div>
+            <h2 style={{fontSize:"18px",fontWeight:"800",marginBottom:"12px",color:locked?"var(--red2)":"var(--yellow)"}}>
+              {locked ? "Ujian Dikunci" : "Peringatan"}
+            </h2>
+            <p style={{fontSize:"14px",color:"var(--gray)",marginBottom:"20px",lineHeight:"1.6"}}>{warningMsg}</p>
+            {!locked && (
+              <button className="btn btn-blue" style={{width:"100%",padding:"12px"}} onClick={() => { setShowWarning(false); enterFullscreen(); }}>
+                🔄 Kembali ke Ujian
+              </button>
+            )}
+            {locked && <p style={{fontSize:"12px",color:"var(--red2)",fontWeight:"600"}}>Panggil pengawas untuk membuka kunci.</p>}
+          </div>
+        </div>
+      )}
+
       <div className="cbt-header">
         <h2>📝 {ujian.mapel} — Kelas {ujian.kelas}</h2>
         <div className="cbt-header-info">
           <div className="cbt-student-info">👤 {siswa.nama} ({siswa.kelas})</div>
+          {tabViolation > 0 && (
+            <div style={{background:"rgba(239,68,68,0.3)",borderRadius:"8px",padding:"4px 10px",fontSize:"12px",color:"#fca5a5",fontWeight:"700"}}>⚠️ {tabViolation}/{MAX_VIOLATIONS}</div>
+          )}
+          <div style={{background:isFullscreen?"rgba(34,197,94,0.2)":"rgba(239,68,68,0.2)",borderRadius:"8px",padding:"4px 10px",fontSize:"12px",color:isFullscreen?"#86efac":"#fca5a5",cursor:"pointer"}} onClick={enterFullscreen}>
+            {isFullscreen ? "🔒 Fullscreen" : "⚠️ Klik Fullscreen"}
+          </div>
           <div className={`cbt-timer ${isDanger ? "danger" : ""}`}>⏱ {formatTime(timeLeft)}</div>
         </div>
       </div>
+
       <div className="cbt-body">
         <div className="cbt-main">
           <div className="cbt-question-card">
@@ -810,7 +1481,8 @@ function StudentExam({ data, onFinish }) {
             <div className="cbt-q-text">{soal[current].pertanyaan}</div>
             <div className="cbt-options">
               {soal[current].opsi.map((o, i) => (
-                <div key={i} className={`cbt-option ${jawaban[current] === i ? "selected" : ""}`} onClick={() => { const j = [...jawaban]; j[current] = i; setJawaban(j); }}>
+                <div key={i} className={`cbt-option ${jawaban[current] === i ? "selected" : ""}`}
+                  onClick={() => { if(locked) return; const j = [...jawaban]; j[current] = i; setJawaban(j); }}>
                   <div className="cbt-option-label">{HURUF[i]}</div>
                   <div className="cbt-option-text">{o}</div>
                 </div>
@@ -819,14 +1491,14 @@ function StudentExam({ data, onFinish }) {
           </div>
           <div className="cbt-nav">
             <button className="btn btn-ghost" onClick={() => setCurrent(Math.max(0, current - 1))} disabled={current === 0}>← Sebelumnya</button>
-            <span style={{fontSize:"13px", color:"var(--gray)"}}>Dijawab: {jawaban.filter(j => j !== null).length}/{soal.length}</span>
-            {current < soal.length - 1 ? (
-              <button className="btn btn-blue" onClick={() => setCurrent(current + 1)}>Selanjutnya →</button>
-            ) : (
-              <button className="btn btn-green" onClick={() => setShowConfirm(true)}>✅ Selesai & Kumpulkan</button>
-            )}
+            <span style={{fontSize:"13px", color:"var(--gray)"}}>Dijawab: {dijawab}/{soal.length}</span>
+            {current < soal.length - 1
+              ? <button className="btn btn-blue" onClick={() => setCurrent(current + 1)}>Selanjutnya →</button>
+              : <button className="btn btn-green" onClick={() => setShowReview(true)}>📋 Review & Kumpulkan</button>
+            }
           </div>
         </div>
+
         <div className="cbt-sidebar">
           <div className="cbt-sidebar-card">
             <h3>Navigasi Soal</h3>
@@ -842,14 +1514,18 @@ function StudentExam({ data, onFinish }) {
               <span><div className="cbt-legend-dot"></div>Belum dijawab</span>
             </div>
           </div>
-          <button className="btn btn-green" style={{width:"100%"}} onClick={() => setShowConfirm(true)}>✅ Kumpulkan Ujian</button>
+          <button className="btn btn-green" style={{width:"100%", marginBottom:"8px"}} onClick={() => setShowReview(true)} disabled={locked}>📋 Review Jawaban</button>
+          <button className="btn btn-ghost" style={{width:"100%", fontSize:"12px"}} onClick={() => setShowConfirm(true)} disabled={locked}>Langsung Kumpulkan</button>
         </div>
       </div>
+
       {showConfirm && (
         <div className="modal-overlay">
           <div className="modal">
             <h2>Kumpulkan Ujian?</h2>
-            <p>Anda telah menjawab <strong>{jawaban.filter(j=>j!==null).length}</strong> dari <strong>{soal.length}</strong> soal. Soal yang belum dijawab akan dianggap salah.</p>
+            <p>Dijawab: <strong>{dijawab}</strong> dari <strong>{soal.length}</strong> soal.</p>
+            {belumDijawab > 0 && <p style={{color:"var(--red2)", fontSize:"13px", marginTop:"6px"}}>⚠️ {belumDijawab} soal belum dijawab — akan dianggap salah.</p>}
+            {tabViolation > 0 && <p style={{color:"var(--red2)", fontSize:"13px", marginTop:"6px"}}>📋 Tercatat {tabViolation} pelanggaran.</p>}
             <div style={{display:"flex", gap:"8px", marginTop:"20px"}}>
               <button className="btn btn-green" style={{flex:1}} onClick={() => handleSubmit(false)}>✅ Ya, Kumpulkan</button>
               <button className="btn btn-ghost" style={{flex:1}} onClick={() => setShowConfirm(false)}>Kembali</button>
@@ -860,6 +1536,8 @@ function StudentExam({ data, onFinish }) {
     </div>
   );
 }
+
+
 
 // ============================================================
 // RESULT SCREEN
