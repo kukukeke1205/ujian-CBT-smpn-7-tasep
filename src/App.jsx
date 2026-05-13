@@ -329,6 +329,25 @@ function formatTime(s) {
 }
 
 // ============================================================
+// PESERTA AKTIF HELPERS
+// Cek apakah ada peserta yang sedang ujian (heartbeat < 30 detik)
+// Digunakan untuk pengaman hapus ujian/soal
+// ============================================================
+async function cekPesertaAktif(ujianId = null) {
+  if (useDemo) return []; // mode demo tidak ada tracking live
+  try {
+    // Heartbeat dianggap masih hidup jika < 30 detik
+    const cutoff = new Date(Date.now() - 30 * 1000).toISOString();
+    let path = `peserta_aktif?status=eq.aktif&last_heartbeat=gte.${cutoff}`;
+    if (ujianId !== null) path += `&ujian_id=eq.${ujianId}`;
+    return await supabase(path);
+  } catch (e) {
+    console.error("cekPesertaAktif error:", e);
+    return [];
+  }
+}
+
+// ============================================================
 // DEMO DATA (dipakai jika Supabase belum dikonfigurasi)
 // ============================================================
 let DEMO_UJIAN = [
@@ -719,6 +738,22 @@ function UjianPage({ ujianList, onRefresh }) {
   const handleHapus = async (ujian) => {
     setSaving(true);
     try {
+      // ── PENGAMAN: Cek apakah ada peserta yang sedang ujian ──
+      if (!useDemo) {
+        const pesertaAktif = await cekPesertaAktif(ujian.id);
+        if (pesertaAktif.length > 0) {
+          const daftar = pesertaAktif.map(p => `• ${p.nama_siswa} (${p.kelas})`).join("\n");
+          alert(
+            `❌ Tidak bisa menghapus ujian ini.\n\n` +
+            `Ada ${pesertaAktif.length} peserta yang sedang mengerjakan ujian:\n${daftar}\n\n` +
+            `Tunggu sampai semua peserta selesai, atau matikan saklar "Aktif" ujian terlebih dahulu.`
+          );
+          setSaving(false);
+          setConfirmHapus(null);
+          return;
+        }
+      }
+
       if (useDemo) {
         const idx = DEMO_UJIAN.findIndex(u => u.id === ujian.id);
         if (idx > -1) DEMO_UJIAN.splice(idx, 1);
@@ -726,6 +761,8 @@ function UjianPage({ ujianList, onRefresh }) {
         // Hapus soal dulu, baru ujian
         await supabase(`soal?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
         await supabase(`hasil?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+        // Bersihkan juga record peserta_aktif yang sudah selesai untuk ujian ini
+        await supabase(`peserta_aktif?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
         await supabase(`ujian?id=eq.${ujian.id}`, { method: "DELETE" });
       }
       await onRefresh();
@@ -943,6 +980,20 @@ function SoalPage({ ujianList, onRefresh }) {
   const handleDelete = async (soalId) => {
     if (!confirm("Hapus soal ini?")) return;
     try {
+      // ── PENGAMAN: Cek peserta aktif untuk ujian ini ──
+      if (!useDemo && selectedUjian) {
+        const pesertaAktif = await cekPesertaAktif(Number(selectedUjian));
+        if (pesertaAktif.length > 0) {
+          alert(
+            `❌ Tidak bisa menghapus soal.\n\n` +
+            `Ada ${pesertaAktif.length} peserta yang sedang mengerjakan ujian ini. ` +
+            `Soal yang sudah ter-load di browser mereka akan kacau jika dihapus sekarang.\n\n` +
+            `Tunggu sampai semua peserta selesai.`
+          );
+          return;
+        }
+      }
+
       if (useDemo) {
         const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
         if (idx > -1) DEMO_UJIAN[idx].soal = DEMO_UJIAN[idx].soal.filter(s => s.id !== soalId);
@@ -958,6 +1009,22 @@ function SoalPage({ ujianList, onRefresh }) {
   const handleHapusSemua = async () => {
     setSaving(true);
     try {
+      // ── PENGAMAN: Cek peserta aktif untuk ujian ini ──
+      if (!useDemo && selectedUjian) {
+        const pesertaAktif = await cekPesertaAktif(Number(selectedUjian));
+        if (pesertaAktif.length > 0) {
+          const daftar = pesertaAktif.map(p => `• ${p.nama_siswa} (${p.kelas})`).join("\n");
+          alert(
+            `❌ Tidak bisa menghapus semua soal.\n\n` +
+            `Ada ${pesertaAktif.length} peserta yang sedang mengerjakan:\n${daftar}\n\n` +
+            `Tunggu sampai mereka selesai dulu.`
+          );
+          setSaving(false);
+          setHapusSemua(false);
+          return;
+        }
+      }
+
       if (useDemo) {
         const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
         if (idx > -1) DEMO_UJIAN[idx].soal = [];
@@ -1384,35 +1451,46 @@ function SoalPage({ ujianList, onRefresh }) {
 // ---- Monitor Ujian & Buka Kunci ----
 function MonitorPage({ ujianList }) {
   const [hasilLive, setHasilLive] = useState([]);
+  const [pesertaLive, setPesertaLive] = useState([]); // peserta sedang ujian
   const [loading, setLoading] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [filterUjian, setFilterUjian] = useState("all"); // filter ujian untuk live
   const [unlockedSiswa, setUnlockedSiswa] = useState(() => {
     try { return JSON.parse(localStorage.getItem("unlocked_siswa") || "[]"); } catch { return []; }
   });
 
-  const loadHasil = useCallback(async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       if (!useDemo) {
-        const data = await supabase("hasil?order=id.desc");
-        setHasilLive(data);
+        // Ambil hasil submit
+        const dataHasil = await supabase("hasil?order=id.desc");
+        setHasilLive(dataHasil);
+        // Ambil peserta yang sedang aktif ujian
+        // Hanya ambil yang heartbeat < 60 detik (yang lebih lama dianggap putus)
+        const cutoff = new Date(Date.now() - 60 * 1000).toISOString();
+        const dataPeserta = await supabase(
+          `peserta_aktif?status=eq.aktif&last_heartbeat=gte.${cutoff}&order=started_at.desc`
+        );
+        setPesertaLive(dataPeserta);
       } else {
         setHasilLive([...DEMO_HASIL]);
+        setPesertaLive([]);
       }
       setLastRefresh(new Date());
     } catch(e) { console.error(e); }
     setLoading(false);
   }, []);
 
-  useEffect(() => { loadHasil(); }, [loadHasil]);
+  useEffect(() => { loadData(); }, [loadData]);
 
-  // Auto-refresh setiap 10 detik
+  // Auto-refresh setiap 3 detik (untuk monitoring real-time)
   useEffect(() => {
     if (!autoRefresh) return;
-    const t = setInterval(loadHasil, 10000);
+    const t = setInterval(loadData, 3000);
     return () => clearInterval(t);
-  }, [autoRefresh, loadHasil]);
+  }, [autoRefresh, loadData]);
 
   const saveUnlocked = (list) => {
     setUnlockedSiswa(list);
@@ -1425,25 +1503,43 @@ function MonitorPage({ ujianList }) {
     alert(`✅ Kunci ujian ${nama} (${kelas}) berhasil dibuka!\nMinta siswa refresh browser dan masuk ulang.`);
   };
 
-  // Statistik
+  // Hitung status koneksi peserta berdasarkan last_heartbeat
+  const getKoneksiStatus = (lastHeartbeat) => {
+    const diff = (Date.now() - new Date(lastHeartbeat).getTime()) / 1000; // detik
+    if (diff < 10) return { label: "Online", color: "var(--green2)", bg: "var(--green3)", icon: "🟢" };
+    if (diff < 30) return { label: "Lag", color: "#b45309", bg: "var(--yellow3)", icon: "🟡" };
+    return { label: "Putus", color: "var(--red2)", bg: "var(--red3)", icon: "🔴" };
+  };
+
+  // Filter peserta live by ujian
+  const pesertaFiltered = filterUjian === "all"
+    ? pesertaLive
+    : pesertaLive.filter(p => String(p.ujian_id) === String(filterUjian));
+
+  // Statistik hasil submit
   const totalSiswa = hasilLive.length;
   const sudahSelesai = hasilLive.length;
   const curiga = hasilLive.filter(h => h.mencurigakan).length;
   const rataRata = totalSiswa > 0 ? Math.round(hasilLive.reduce((a,h) => a + (h.nilai||0), 0) / totalSiswa) : 0;
 
+  // Statistik live
+  const totalAktif = pesertaLive.length;
+  const pelanggaranAktif = pesertaLive.filter(p => (p.pelanggaran||0) > 0).length;
+
   return (
     <>
       <div className="page-header">
         <h1>🖥️ Monitor Ujian Live</h1>
-        <p>Pantau aktivitas siswa secara real-time</p>
+        <p>Pantau aktivitas siswa secara real-time (update tiap 3 detik)</p>
       </div>
 
       {/* Status bar */}
       <div style={{display:"flex", gap:"12px", marginBottom:"20px", flexWrap:"wrap"}}>
         {[
-          { icon:"✅", label:"Sudah Submit", val:sudahSelesai, bg:"var(--green3)", color:"var(--green2)" },
+          { icon:"🟢", label:"Sedang Ujian", val:totalAktif, bg:"var(--green3)", color:"var(--green2)" },
+          { icon:"✅", label:"Sudah Submit", val:sudahSelesai, bg:"var(--blue3)", color:"var(--blue2)" },
           { icon:"🚨", label:"Mencurigakan", val:curiga, bg:"var(--red3)", color:"var(--red2)" },
-          { icon:"⭐", label:"Rata-rata Nilai", val:rataRata, bg:"var(--blue3)", color:"var(--blue2)" },
+          { icon:"⭐", label:"Rata-rata Nilai", val:rataRata, bg:"var(--yellow3)", color:"#b45309" },
         ].map((s,i) => (
           <div key={i} style={{background:s.bg, borderRadius:"var(--radius)", padding:"16px 20px", flex:"1", minWidth:"140px"}}>
             <div style={{fontSize:"22px", fontWeight:"800", color:s.color, fontFamily:"var(--mono)"}}>{s.icon} {s.val}</div>
@@ -1457,7 +1553,7 @@ function MonitorPage({ ujianList }) {
           </div>
           <div style={{fontSize:"11px", color:"var(--gray)"}}>Update: {lastRefresh.toLocaleTimeString('id-ID')}</div>
           <div style={{display:"flex", gap:"6px"}}>
-            <button className="btn btn-blue" style={{fontSize:"11px", padding:"4px 10px"}} onClick={loadHasil} disabled={loading}>
+            <button className="btn btn-blue" style={{fontSize:"11px", padding:"4px 10px"}} onClick={loadData} disabled={loading}>
               {loading ? "..." : "🔄 Refresh"}
             </button>
             <button className={`btn ${autoRefresh ? "btn-red" : "btn-green"}`} style={{fontSize:"11px", padding:"4px 10px"}} onClick={() => setAutoRefresh(v => !v)}>
@@ -1467,26 +1563,137 @@ function MonitorPage({ ujianList }) {
         </div>
       </div>
 
-      {/* Alert mencurigakan */}
-      {curiga > 0 && (
-        <div style={{background:"var(--red3)", border:"1px solid var(--red)", borderRadius:"var(--radius)", padding:"14px 18px", marginBottom:"16px", display:"flex", alignItems:"center", gap:"12px"}}>
-          <div style={{fontSize:"20px"}}>🚨</div>
+      {/* Alert pelanggaran live */}
+      {pelanggaranAktif > 0 && (
+        <div style={{background:"var(--yellow3)", border:"1px solid var(--yellow)", borderRadius:"var(--radius)", padding:"14px 18px", marginBottom:"16px", display:"flex", alignItems:"center", gap:"12px"}}>
+          <div style={{fontSize:"20px"}}>⚠️</div>
           <div style={{flex:1}}>
-            <div style={{fontWeight:"700", color:"var(--red2)"}}>Terdeteksi {curiga} siswa mencurigakan!</div>
-            <div style={{fontSize:"12px", color:"var(--red2)", opacity:0.8}}>Lihat detail di tabel bawah — kolom Pelanggaran.</div>
+            <div style={{fontWeight:"700", color:"#b45309"}}>{pelanggaranAktif} peserta sedang ujian dengan pelanggaran!</div>
+            <div style={{fontSize:"12px", color:"#b45309", opacity:0.8}}>Lihat detail di tabel "Sedang Ujian (Live)" — kolom Pelanggaran.</div>
           </div>
         </div>
       )}
 
-      {/* Tabel hasil live */}
+      {/* Alert mencurigakan (sudah submit) */}
+      {curiga > 0 && (
+        <div style={{background:"var(--red3)", border:"1px solid var(--red)", borderRadius:"var(--radius)", padding:"14px 18px", marginBottom:"16px", display:"flex", alignItems:"center", gap:"12px"}}>
+          <div style={{fontSize:"20px"}}>🚨</div>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:"700", color:"var(--red2)"}}>Terdeteksi {curiga} siswa mencurigakan (sudah submit)!</div>
+            <div style={{fontSize:"12px", color:"var(--red2)", opacity:0.8}}>Lihat detail di tabel Rekap Siswa.</div>
+          </div>
+        </div>
+      )}
+
+      {/* ═════════ TABEL PESERTA SEDANG UJIAN (LIVE) ═════════ */}
+      <div className="card">
+        <div className="card-header" style={{flexWrap:"wrap", gap:"12px"}}>
+          <h2>🟢 Sedang Ujian Live ({pesertaFiltered.length})</h2>
+          <select
+            value={filterUjian}
+            onChange={e => setFilterUjian(e.target.value)}
+            style={{padding:"6px 12px", border:"1.5px solid var(--border)", borderRadius:"var(--radius2)", fontSize:"13px", background:"white"}}
+          >
+            <option value="all">Semua Ujian</option>
+            {ujianList.map(u => (
+              <option key={u.id} value={u.id}>{u.mapel} — Kelas {u.kelas}</option>
+            ))}
+          </select>
+        </div>
+        {pesertaFiltered.length === 0 ? (
+          <div className="empty-state">
+            <div className="icon">😴</div>
+            <p>Belum ada peserta yang sedang ujian.</p>
+            <p style={{fontSize:"12px", marginTop:"6px"}}>Halaman ini akan auto-update saat ada siswa mulai ujian.</p>
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Nama</th>
+                  <th>Kelas</th>
+                  <th>Mapel</th>
+                  <th>Progress</th>
+                  <th>Koneksi</th>
+                  <th>Pelanggaran</th>
+                  <th>Mulai</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pesertaFiltered.map((p, i) => {
+                  const koneksi = getKoneksiStatus(p.last_heartbeat);
+                  const persen = p.total_soal > 0 ? Math.round((p.progress_jawaban / p.total_soal) * 100) : 0;
+                  const mulai = new Date(p.started_at).toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'});
+                  const isWarning = (p.pelanggaran||0) > 0;
+                  return (
+                    <tr key={p.id} style={{background: isWarning ? "#fff7ed" : ""}}>
+                      <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
+                      <td><strong>{p.nama_siswa}</strong></td>
+                      <td>{p.kelas}</td>
+                      <td>{p.mapel || "-"}</td>
+                      <td style={{minWidth:"140px"}}>
+                        <div style={{display:"flex", alignItems:"center", gap:"8px"}}>
+                          <div style={{flex:1, height:"8px", background:"var(--border)", borderRadius:"4px", overflow:"hidden"}}>
+                            <div style={{
+                              height:"100%",
+                              width: `${persen}%`,
+                              background: persen >= 80 ? "var(--green)" : persen >= 50 ? "var(--blue)" : "var(--yellow)",
+                              transition: "width .3s"
+                            }}></div>
+                          </div>
+                          <span style={{fontSize:"11px", fontFamily:"var(--mono)", fontWeight:"700", color:"var(--navy)", minWidth:"40px"}}>
+                            {p.progress_jawaban}/{p.total_soal}
+                          </span>
+                        </div>
+                      </td>
+                      <td>
+                        <span style={{
+                          fontSize:"11px",
+                          fontWeight:"700",
+                          color: koneksi.color,
+                          background: koneksi.bg,
+                          padding:"3px 8px",
+                          borderRadius:"99px",
+                          display:"inline-flex",
+                          alignItems:"center",
+                          gap:"4px"
+                        }}>
+                          {koneksi.icon} {koneksi.label}
+                        </span>
+                      </td>
+                      <td>
+                        {(p.pelanggaran||0) === 0
+                          ? <span style={{color:"var(--green2)", fontSize:"12px"}}>✅ Bersih</span>
+                          : <span style={{color:"var(--red2)", fontSize:"12px", fontWeight:"700"}} title={
+                              Array.isArray(p.riwayat_pelanggaran)
+                                ? p.riwayat_pelanggaran.map(r => `${new Date(r.waktu).toLocaleTimeString('id-ID')} - ${r.jenis}`).join('\n')
+                                : ''
+                            }>
+                              ⚠️ {p.pelanggaran}x
+                            </span>
+                        }
+                      </td>
+                      <td style={{fontSize:"12px", color:"var(--gray)", fontFamily:"var(--mono)"}}>{mulai}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ═════════ TABEL HASIL SUBMIT ═════════ */}
       <div className="card">
         <div className="card-header">
-          <h2>📊 Rekap Siswa ({totalSiswa})</h2>
+          <h2>📊 Rekap Siswa Sudah Submit ({totalSiswa})</h2>
         </div>
         {hasilLive.length === 0 ? (
           <div className="empty-state">
             <div className="icon">⏳</div>
-            <p>Belum ada siswa yang submit. Halaman ini auto-refresh setiap 10 detik.</p>
+            <p>Belum ada siswa yang submit.</p>
           </div>
         ) : (
           <div className="table-wrap">
@@ -1703,6 +1910,8 @@ function StudentExam({ data, onFinish }) {
   const [queuePos, setQueuePos] = useState(null);
   const [timerPaused, setTimerPaused] = useState(false); // pause saat layar mati
   const hiddenSinceRef = useRef(null); // waktu layar mulai gelap
+  const pesertaAktifIdRef = useRef(null); // ID record di tabel peserta_aktif
+  const riwayatPelanggaranRef = useRef([]); // log pelanggaran untuk dikirim ke monitor
   const VIOLATION_THRESHOLD_MS = 5000; // 5 detik — lebih dari ini = pelanggaran
   const MAX_VIOLATIONS = 3;
 
@@ -1808,6 +2017,118 @@ function StudentExam({ data, onFinish }) {
     return () => clearInterval(t);
   }, [locked, submitting, timerPaused]);
 
+  // ── HEARTBEAT: Daftarkan peserta saat mulai & update tiap 5 detik ──
+  // Memungkinkan guru memantau peserta secara live di MonitorPage
+  useEffect(() => {
+    if (useDemo) return; // mode demo tidak track ke server
+    let mounted = true;
+
+    // 1) INSERT saat mount — daftarkan peserta sebagai "aktif"
+    (async () => {
+      try {
+        const result = await supabase("peserta_aktif", {
+          method: "POST",
+          body: JSON.stringify({
+            ujian_id: ujian.id,
+            nama_siswa: siswa.nama,
+            kelas: siswa.kelas,
+            mapel: ujian.mapel,
+            progress_jawaban: 0,
+            total_soal: soal.length,
+            pelanggaran: 0,
+            riwayat_pelanggaran: [],
+            status: "aktif",
+          }),
+        });
+        if (mounted && result && result[0]) {
+          pesertaAktifIdRef.current = result[0].id;
+        }
+      } catch (e) {
+        console.warn("Gagal daftar peserta aktif:", e);
+      }
+    })();
+
+    // 2) Cleanup saat komponen di-unmount paksa (siswa close tab tanpa submit)
+    // Browser akan tetap update last_heartbeat saat polling berikutnya gagal,
+    // dan guru akan lihat status offline setelah 30 detik.
+    return () => {
+      mounted = false;
+      // Best-effort: tandai status sebagai "terputus" jika tab ditutup
+      // Gunakan sendBeacon agar request tetap terkirim walau halaman ditutup
+      if (pesertaAktifIdRef.current && !useDemo) {
+        try {
+          const payload = JSON.stringify({ status: "terputus" });
+          const url = `${SUPABASE_URL}/rest/v1/peserta_aktif?id=eq.${pesertaAktifIdRef.current}`;
+          // sendBeacon tidak bisa set header custom, jadi pakai fetch dengan keepalive
+          fetch(url, {
+            method: "PATCH",
+            headers: {
+              apikey: SUPABASE_ANON_KEY,
+              Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+              "Content-Type": "application/json",
+              Prefer: "return=minimal",
+            },
+            body: payload,
+            keepalive: true,
+          }).catch(() => {});
+        } catch {}
+      }
+    };
+  }, [ujian.id, siswa.nama, siswa.kelas, ujian.mapel, soal.length]);
+
+  // 3) Heartbeat tiap 5 detik — update progress, pelanggaran, last_heartbeat
+  // Pakai ref untuk hindari re-create interval setiap kali jawaban/violation berubah
+  const heartbeatStateRef = useRef({ jawaban, tabViolation, locked, submitting });
+  useEffect(() => {
+    heartbeatStateRef.current = { jawaban, tabViolation, locked, submitting };
+  }, [jawaban, tabViolation, locked, submitting]);
+
+  useEffect(() => {
+    if (useDemo) return;
+
+    const tick = async () => {
+      const state = heartbeatStateRef.current;
+      if (state.locked || state.submitting) return; // skip kalau terkunci/submitting
+      if (!pesertaAktifIdRef.current) return; // belum berhasil INSERT
+      try {
+        const progress = state.jawaban.filter(j => j !== null).length;
+        await supabase(`peserta_aktif?id=eq.${pesertaAktifIdRef.current}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            progress_jawaban: progress,
+            pelanggaran: state.tabViolation,
+            riwayat_pelanggaran: riwayatPelanggaranRef.current,
+            last_heartbeat: new Date().toISOString(),
+          }),
+          prefer: "return=minimal",
+        });
+      } catch (e) {
+        // Diam saja — jangan ganggu ujian siswa kalau heartbeat gagal
+        console.warn("Heartbeat gagal:", e.message);
+      }
+    };
+
+    // Tunggu 1 detik agar INSERT awal sempat selesai dulu, baru mulai heartbeat
+    const startupDelay = setTimeout(() => {
+      tick(); // kirim segera
+    }, 1000);
+    const t = setInterval(tick, 5000);
+    return () => {
+      clearTimeout(startupDelay);
+      clearInterval(t);
+    };
+  }, []); // empty deps — interval dibuat sekali saja
+
+  // 4) Catat riwayat pelanggaran (untuk dilihat guru)
+  useEffect(() => {
+    if (tabViolation > 0 && riwayatPelanggaranRef.current.length < tabViolation) {
+      riwayatPelanggaranRef.current = [
+        ...riwayatPelanggaranRef.current,
+        { waktu: new Date().toISOString(), jenis: "keluar_fullscreen_atau_tab" },
+      ];
+    }
+  }, [tabViolation]);
+
   // ── Submit dengan Antrian ───────────────────────────────────
   const handleSubmit = useCallback(async (auto = false) => {
     if (submitting) return;
@@ -1846,6 +2167,23 @@ function StudentExam({ data, onFinish }) {
     } catch(e) {
       setSubmitStatus("error");
       console.error("Gagal simpan hasil:", e);
+    }
+
+    // Tandai peserta_aktif sebagai SELESAI (best-effort, tidak blocking)
+    if (!useDemo && pesertaAktifIdRef.current) {
+      try {
+        await supabase(`peserta_aktif?id=eq.${pesertaAktifIdRef.current}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "selesai",
+            progress_jawaban: jawaban.filter(j => j !== null).length,
+            pelanggaran: tabViolation,
+          }),
+          prefer: "return=minimal",
+        });
+      } catch (e) {
+        console.warn("Gagal update status peserta_aktif:", e);
+      }
     }
 
     if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
