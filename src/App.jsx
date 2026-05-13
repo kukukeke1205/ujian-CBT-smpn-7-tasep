@@ -87,12 +87,21 @@ function shuffleArray(arr) {
 
 // Acak soal DAN opsi jawaban, kembalikan soal dengan mapping jawaban benar
 function shuffleSoalDanOpsi(soalAsli) {
+  if (!soalAsli || soalAsli.length === 0) return [];
   const soalAcak = shuffleArray(soalAsli);
   return soalAcak.map(s => {
-    const jawabanAsli = s.opsi[s.jawaban];
-    const opsiAcak = shuffleArray(s.opsi);
+    // Pastikan opsi adalah array yang valid
+    let opsi = s.opsi;
+    if (!Array.isArray(opsi)) {
+      try { opsi = JSON.parse(opsi); } catch { opsi = ["A","B","C","D"]; }
+    }
+    if (!opsi || opsi.length === 0) opsi = ["A","B","C","D"];
+
+    const jawabanIdx = typeof s.jawaban === 'number' ? s.jawaban : 0;
+    const jawabanAsli = opsi[jawabanIdx] ?? opsi[0];
+    const opsiAcak = shuffleArray([...opsi]);
     const jawabanBaru = opsiAcak.indexOf(jawabanAsli);
-    return { ...s, opsi: opsiAcak, jawaban: jawabanBaru };
+    return { ...s, opsi: opsiAcak, jawaban: jawabanBaru < 0 ? 0 : jawabanBaru };
   });
 }
 
@@ -101,7 +110,7 @@ function shuffleSoalDanOpsi(soalAsli) {
 // ============================================================
 const MAPEL = [
   "Matematika","Bahasa Indonesia","Bahasa Inggris","IPA","IPS",
-  "PKN","Agama"," Informatika","PJOK","Prakarya",
+  "PKn","Agama","Informatika","PJOK","Prakarya",
 ];
 
 const GURU_ACCOUNTS = [
@@ -338,6 +347,39 @@ let useDemo = SUPABASE_URL.includes("YOUR_PROJECT");
 // ============================================================
 // MAIN APP
 // ============================================================
+// ============================================================
+// ERROR BOUNDARY — Tangkap error blank putih
+// ============================================================
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0f172a",padding:"20px"}}>
+          <div style={{background:"white",borderRadius:"16px",padding:"32px",maxWidth:"480px",width:"100%",textAlign:"center"}}>
+            <div style={{fontSize:"48px",marginBottom:"12px"}}>⚠️</div>
+            <h2 style={{fontSize:"18px",fontWeight:"800",marginBottom:"8px",color:"#0f172a"}}>Terjadi Kesalahan</h2>
+            <p style={{color:"#64748b",fontSize:"14px",marginBottom:"16px"}}>
+              {this.state.error?.message || "Error tidak diketahui"}
+            </p>
+            <div style={{background:"#f1f5f9",borderRadius:"8px",padding:"12px",fontSize:"12px",color:"#64748b",marginBottom:"20px",textAlign:"left",fontFamily:"monospace"}}>
+              {String(this.state.error)}
+            </div>
+            <button
+              onClick={() => window.location.reload()}
+              style={{background:"#2563eb",color:"white",border:"none",borderRadius:"8px",padding:"12px 24px",fontSize:"14px",fontWeight:"700",cursor:"pointer",width:"100%"}}
+            >
+              🔄 Kembali ke Halaman Login
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [screen, setScreen] = useState("login"); // login | guru-dashboard | student-exam | result
   const [guru, setGuru] = useState(null);
@@ -358,10 +400,12 @@ export default function App() {
           <GuruDashboard guru={guru} onLogout={() => { setGuru(null); setScreen("login"); }} />
         )}
         {screen === "student-exam" && (
-          <StudentExam
-            data={studentData}
-            onFinish={(result) => { setExamResult(result); setScreen("result"); }}
-          />
+          <ErrorBoundary>
+            <StudentExam
+              data={studentData}
+              onFinish={(result) => { setExamResult(result); setScreen("result"); }}
+            />
+          </ErrorBoundary>
         )}
         {screen === "result" && (
           <ResultScreen result={examResult} onBack={() => setScreen("login")} />
@@ -401,12 +445,21 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
       } else {
         const data = await supabase(`ujian?key=eq.${form.examKey.toUpperCase()}&aktif=eq.true`);
         if (data.length > 0) {
-          const soalData = await supabase(`soal?ujian_id=eq.${data[0].id}`);
-          ujian = { ...data[0], soal: soalData };
+          const soalRaw = await supabase(`soal?ujian_id=eq.${data[0].id}&order=id.asc`);
+          // Parse opsi — bisa berupa array atau JSON string
+          const soalParsed = soalRaw.map(s => ({
+            ...s,
+            opsi: Array.isArray(s.opsi)
+              ? s.opsi
+              : typeof s.opsi === 'string'
+                ? (() => { try { return JSON.parse(s.opsi); } catch { return []; } })()
+                : [],
+          }));
+          ujian = { ...data[0], soal: soalParsed };
         }
       }
       if (!ujian || !ujian.soal || ujian.soal.length === 0) {
-        setError("Kode ujian tidak ditemukan atau ujian tidak aktif.");
+        setError("Kode ujian tidak ditemukan, ujian tidak aktif, atau belum ada soal.");
       } else {
         // Cek jadwal jam buka/tutup
         if (ujian.jam_buka || ujian.jam_tutup) {
@@ -424,7 +477,8 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
         onStudentJoin({ ujian, siswa: { nama: form.nama, kelas: form.kelas } });
       }
     } catch (e) {
-      setError("Gagal terhubung. Periksa koneksi internet.");
+      console.error("Error login siswa:", e);
+      setError("Gagal terhubung. Periksa koneksi internet. Detail: " + e.message);
     }
     setLoading(false);
   };
@@ -495,14 +549,26 @@ function GuruDashboard({ guru, onLogout }) {
         setUjianList([...DEMO_UJIAN]);
         setHasilList([...DEMO_HASIL]);
       } else {
-        const [u, h] = await Promise.all([
+        // Load ujian, soal, dan hasil sekaligus
+        const [ujianRaw, soalRaw, hasilRaw] = await Promise.all([
           supabase("ujian?order=id.desc"),
+          supabase("soal?order=ujian_id.asc,id.asc"),
           supabase("hasil?order=id.desc"),
         ]);
-        setUjianList(u);
-        setHasilList(h);
+        // Gabungkan soal ke masing-masing ujian
+        const ujianDenganSoal = ujianRaw.map(u => ({
+          ...u,
+          soal: soalRaw.filter(s => s.ujian_id === u.id).map(s => ({
+            ...s,
+            opsi: Array.isArray(s.opsi) ? s.opsi : (typeof s.opsi === 'string' ? JSON.parse(s.opsi) : []),
+          }))
+        }));
+        setUjianList(ujianDenganSoal);
+        setHasilList(hasilRaw);
       }
-    } catch(e) { console.error(e); }
+    } catch(e) {
+      console.error("Gagal load data:", e);
+    }
     setLoading(false);
   }, []);
 
@@ -608,23 +674,63 @@ function DashboardPage({ ujianList, hasilList }) {
 function UjianPage({ ujianList, onRefresh }) {
   const [showForm, setShowForm] = useState(false);
   const [showKey, setShowKey] = useState(null);
-  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "X", durasi: 60, jam_buka: "", jam_tutup: "" });
+  const [editUjian, setEditUjian] = useState(null); // ujian yang sedang diedit
+  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "", durasi: 60, jam_buka: "", jam_tutup: "" });
   const [saving, setSaving] = useState(false);
+  const [confirmHapus, setConfirmHapus] = useState(null); // ujian yang akan dihapus
+
+  const resetForm = () => {
+    setForm({ mapel: MAPEL[0], kelas: "", durasi: 60, jam_buka: "", jam_tutup: "" });
+    setEditUjian(null);
+    setShowForm(false);
+  };
 
   const handleCreate = async () => {
+    if (!form.kelas.trim()) return alert("Kelas tidak boleh kosong.");
     setSaving(true);
-    const newUjian = { ...form, durasi: Number(form.durasi), key: genKey(), aktif: true, soal: [] };
     try {
       if (useDemo) {
-        newUjian.id = Date.now();
-        DEMO_UJIAN.push(newUjian);
+        DEMO_UJIAN.push({ ...form, durasi: Number(form.durasi), key: genKey(), aktif: true, soal: [], id: Date.now() });
       } else {
-        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), key: newUjian.key, aktif: true, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
+        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), key: genKey(), aktif: true, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
       }
       await onRefresh();
-      setShowForm(false);
-      setForm({ mapel: MAPEL[0], kelas: "X", durasi: 60, jam_buka: "", jam_tutup: "" });
+      resetForm();
     } catch(e) { alert("Gagal membuat ujian: " + e.message); }
+    setSaving(false);
+  };
+
+  const handleEdit = async () => {
+    if (!form.kelas.trim()) return alert("Kelas tidak boleh kosong.");
+    setSaving(true);
+    try {
+      if (useDemo) {
+        const idx = DEMO_UJIAN.findIndex(u => u.id === editUjian.id);
+        if (idx > -1) DEMO_UJIAN[idx] = { ...DEMO_UJIAN[idx], mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null };
+      } else {
+        await supabase(`ujian?id=eq.${editUjian.id}`, { method: "PATCH", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
+      }
+      await onRefresh();
+      resetForm();
+    } catch(e) { alert("Gagal edit ujian: " + e.message); }
+    setSaving(false);
+  };
+
+  const handleHapus = async (ujian) => {
+    setSaving(true);
+    try {
+      if (useDemo) {
+        const idx = DEMO_UJIAN.findIndex(u => u.id === ujian.id);
+        if (idx > -1) DEMO_UJIAN.splice(idx, 1);
+      } else {
+        // Hapus soal dulu, baru ujian
+        await supabase(`soal?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+        await supabase(`hasil?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+        await supabase(`ujian?id=eq.${ujian.id}`, { method: "DELETE" });
+      }
+      await onRefresh();
+      setConfirmHapus(null);
+    } catch(e) { alert("Gagal hapus: " + e.message); }
     setSaving(false);
   };
 
@@ -640,6 +746,13 @@ function UjianPage({ ujianList, onRefresh }) {
     } catch(e) { alert("Gagal update: " + e.message); }
   };
 
+  const bukaFormEdit = (ujian) => {
+    setEditUjian(ujian);
+    setForm({ mapel: ujian.mapel, kelas: ujian.kelas, durasi: ujian.durasi, jam_buka: ujian.jam_buka || "", jam_tutup: ujian.jam_tutup || "" });
+    setShowForm(true);
+    window.scrollTo(0, 0);
+  };
+
   const getJadwalStatus = (u) => {
     if (!u.jam_buka && !u.jam_tutup) return null;
     const now = new Date();
@@ -651,15 +764,19 @@ function UjianPage({ ujianList, onRefresh }) {
 
   return (
     <>
-      <div className="page-header"><h1>Kelola Ujian</h1><p>Buat dan atur sesi ujian</p></div>
+      <div className="page-header"><h1>Kelola Ujian</h1><p>Buat, edit, dan atur sesi ujian</p></div>
       <div className="card">
         <div className="card-header">
           <h2>Daftar Ujian ({ujianList.length})</h2>
-          <button className="btn btn-blue" onClick={() => setShowForm(!showForm)}>+ Buat Ujian</button>
+          <button className="btn btn-blue" onClick={() => { resetForm(); setShowForm(true); }}>+ Buat Ujian</button>
         </div>
+
+        {/* Form Buat / Edit Ujian */}
         {showForm && (
-          <div style={{background:"var(--light)", borderRadius:"var(--radius)", padding:"20px", marginBottom:"20px"}}>
-            <h3 style={{marginBottom:"16px", fontSize:"15px", fontWeight:"700"}}>Ujian Baru</h3>
+          <div style={{background: editUjian ? "var(--yellow3)" : "var(--light)", borderRadius:"var(--radius)", padding:"20px", marginBottom:"20px", border: editUjian ? "1.5px solid var(--yellow)" : "none"}}>
+            <h3 style={{marginBottom:"16px", fontSize:"15px", fontWeight:"700"}}>
+              {editUjian ? `✏️ Edit Ujian: ${editUjian.mapel} — ${editUjian.kelas}` : "Ujian Baru"}
+            </h3>
             <div className="form-grid">
               <div className="form-field">
                 <label>Mata Pelajaran</label>
@@ -669,37 +786,41 @@ function UjianPage({ ujianList, onRefresh }) {
               </div>
               <div className="form-field"><label>Kelas</label><input value={form.kelas} onChange={e => setForm(p=>({...p, kelas:e.target.value}))} placeholder="VII A" /></div>
               <div className="form-field"><label>Durasi (menit)</label><input type="number" value={form.durasi} onChange={e => setForm(p=>({...p, durasi:e.target.value}))} /></div>
-              <div className="form-field">
-                <label>⏰ Jam Buka (opsional)</label>
-                <input type="time" value={form.jam_buka} onChange={e => setForm(p=>({...p, jam_buka:e.target.value}))} />
-              </div>
-              <div className="form-field">
-                <label>⏰ Jam Tutup (opsional)</label>
-                <input type="time" value={form.jam_tutup} onChange={e => setForm(p=>({...p, jam_tutup:e.target.value}))} />
-              </div>
+              <div className="form-field"><label>⏰ Jam Buka (opsional)</label><input type="time" value={form.jam_buka} onChange={e => setForm(p=>({...p, jam_buka:e.target.value}))} /></div>
+              <div className="form-field"><label>⏰ Jam Tutup (opsional)</label><input type="time" value={form.jam_tutup} onChange={e => setForm(p=>({...p, jam_tutup:e.target.value}))} /></div>
             </div>
-            <div style={{background:"var(--yellow3)", borderRadius:"8px", padding:"10px 14px", fontSize:"12px", marginBottom:"16px", color:"#92400e"}}>
-              💡 Jam Buka/Tutup bersifat opsional. Jika diisi, siswa hanya bisa masuk dalam rentang waktu tersebut.
+            <div style={{background:"rgba(255,255,255,0.7)", borderRadius:"8px", padding:"10px 14px", fontSize:"12px", marginBottom:"16px", color:"#92400e"}}>
+              💡 Jam Buka/Tutup opsional. Kosongkan jika tidak perlu jadwal otomatis.
             </div>
             <div style={{display:"flex", gap:"8px"}}>
-              <button className="btn btn-green" onClick={handleCreate} disabled={saving}>{saving?"Menyimpan...":"✅ Simpan Ujian"}</button>
-              <button className="btn btn-ghost" onClick={() => setShowForm(false)}>Batal</button>
+              <button className="btn btn-green" onClick={editUjian ? handleEdit : handleCreate} disabled={saving}>
+                {saving ? "Menyimpan..." : editUjian ? "💾 Simpan Perubahan" : "✅ Buat Ujian"}
+              </button>
+              <button className="btn btn-ghost" onClick={resetForm}>Batal</button>
             </div>
           </div>
         )}
+
         <div className="ujian-grid">
           {ujianList.map(u => {
             const jadwal = getJadwalStatus(u);
             return (
               <div key={u.id} className="ujian-card">
-                <h3>{u.mapel}</h3>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"6px"}}>
+                  <h3 style={{margin:0}}>{u.mapel}</h3>
+                  <span className={`badge ${u.aktif ? "badge-green" : "badge-red"}`}>{u.aktif ? "Aktif" : "Nonaktif"}</span>
+                </div>
                 <div className="meta">Kelas {u.kelas} • {u.durasi} menit • {(u.soal||[]).length} soal</div>
                 {u.jam_buka && <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"4px"}}>⏰ {u.jam_buka} – {u.jam_tutup||"∞"}</div>}
                 {jadwal && <span className={`badge ${jadwal.color}`} style={{marginBottom:"8px", display:"inline-block"}}>{jadwal.label}</span>}
                 <div className="key-badge">{u.key}</div>
-                <div className="actions">
+                <div className="actions" style={{marginTop:"12px"}}>
                   <button className="btn btn-blue" onClick={() => setShowKey(u)}>🔑 Kode</button>
-                  <button className={`btn ${u.aktif ? "btn-red" : "btn-green"}`} onClick={() => toggleAktif(u)}>{u.aktif ? "⏸ Nonaktif" : "▶ Aktif"}</button>
+                  <button className="btn btn-ghost" onClick={() => bukaFormEdit(u)}>✏️ Edit</button>
+                  <button className={`btn ${u.aktif ? "btn-red" : "btn-green"}`} onClick={() => toggleAktif(u)}>
+                    {u.aktif ? "⏸ Nonaktif" : "▶ Aktif"}
+                  </button>
+                  <button className="btn btn-red" onClick={() => setConfirmHapus(u)}>🗑️ Hapus</button>
                 </div>
               </div>
             );
@@ -707,6 +828,8 @@ function UjianPage({ ujianList, onRefresh }) {
           {ujianList.length === 0 && <div className="empty-state"><div className="icon">📋</div><p>Belum ada ujian.</p></div>}
         </div>
       </div>
+
+      {/* Modal Kode Ujian */}
       {showKey && (
         <div className="modal-overlay" onClick={() => setShowKey(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -722,6 +845,28 @@ function UjianPage({ ujianList, onRefresh }) {
           </div>
         </div>
       )}
+
+      {/* Modal Konfirmasi Hapus */}
+      {confirmHapus && (
+        <div className="modal-overlay" onClick={() => setConfirmHapus(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div style={{fontSize:"48px", textAlign:"center", marginBottom:"12px"}}>⚠️</div>
+            <h2 style={{textAlign:"center"}}>Hapus Ujian?</h2>
+            <p style={{textAlign:"center", color:"var(--gray)"}}>
+              Anda akan menghapus ujian <strong>{confirmHapus.mapel} — Kelas {confirmHapus.kelas}</strong> beserta seluruh soal dan hasil nilainya.
+            </p>
+            <div style={{background:"var(--red3)", borderRadius:"var(--radius2)", padding:"12px", margin:"16px 0", fontSize:"13px", color:"var(--red2)", fontWeight:"600", textAlign:"center"}}>
+              ❌ Tindakan ini tidak bisa dibatalkan!
+            </div>
+            <div style={{display:"flex", gap:"8px"}}>
+              <button className="btn btn-red" style={{flex:1, padding:"12px"}} onClick={() => handleHapus(confirmHapus)} disabled={saving}>
+                {saving ? "Menghapus..." : "🗑️ Ya, Hapus"}
+              </button>
+              <button className="btn btn-ghost" style={{flex:1, padding:"12px"}} onClick={() => setConfirmHapus(null)}>Batal</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -731,11 +876,13 @@ function SoalPage({ ujianList, onRefresh }) {
   const [selectedUjian, setSelectedUjian] = useState("");
   const [soalList, setSoalList] = useState([]);
   const [form, setForm] = useState({ pertanyaan: "", gambar: "", opsi: ["","","",""], jawaban: 0 });
+  const [editSoal, setEditSoal] = useState(null); // soal yang sedang diedit
   const [saving, setSaving] = useState(false);
-  const [uploadMode, setUploadMode] = useState("manual"); // manual | excel | word
+  const [uploadMode, setUploadMode] = useState("manual");
   const [uploadStatus, setUploadStatus] = useState("");
   const [previewSoal, setPreviewSoal] = useState([]);
   const [importing, setImporting] = useState(false);
+  const [hapusSemua, setHapusSemua] = useState(false);
 
   useEffect(() => {
     if (selectedUjian) {
@@ -744,24 +891,53 @@ function SoalPage({ ujianList, onRefresh }) {
     }
   }, [selectedUjian, ujianList]);
 
+  const resetForm = () => {
+    setForm({ pertanyaan: "", gambar: "", opsi: ["","","",""], jawaban: 0 });
+    setEditSoal(null);
+  };
+
   const handleSave = async () => {
     if (!selectedUjian) return alert("Pilih ujian terlebih dahulu.");
     if (!form.pertanyaan.trim()) return alert("Pertanyaan tidak boleh kosong.");
     if (form.opsi.some(o => !o.trim())) return alert("Semua opsi harus diisi.");
     setSaving(true);
     try {
-      const soalBaru = { ...form, opsi: [...form.opsi], id: Date.now() };
-      if (useDemo) {
-        const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
-        if (idx > -1) { DEMO_UJIAN[idx].soal = [...(DEMO_UJIAN[idx].soal||[]), soalBaru]; }
+      if (editSoal) {
+        // MODE EDIT
+        if (useDemo) {
+          const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
+          if (idx > -1) {
+            const si = DEMO_UJIAN[idx].soal.findIndex(s => s.id === editSoal.id);
+            if (si > -1) DEMO_UJIAN[idx].soal[si] = { ...editSoal, ...form, opsi: [...form.opsi] };
+          }
+        } else {
+          await supabase(`soal?id=eq.${editSoal.id}`, { method: "PATCH", body: JSON.stringify({ pertanyaan: form.pertanyaan, gambar: form.gambar || null, opsi: form.opsi, jawaban: form.jawaban }) });
+        }
+        await onRefresh();
+        setSoalList(prev => prev.map(s => s.id === editSoal.id ? { ...s, ...form, opsi: [...form.opsi] } : s));
+        resetForm();
       } else {
-        await supabase("soal", { method: "POST", body: JSON.stringify({ ujian_id: Number(selectedUjian), pertanyaan: form.pertanyaan, gambar: form.gambar || null, opsi: form.opsi, jawaban: form.jawaban }) });
+        // MODE TAMBAH BARU
+        const soalBaru = { ...form, opsi: [...form.opsi], id: Date.now() };
+        if (useDemo) {
+          const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
+          if (idx > -1) { DEMO_UJIAN[idx].soal = [...(DEMO_UJIAN[idx].soal||[]), soalBaru]; }
+        } else {
+          await supabase("soal", { method: "POST", body: JSON.stringify({ ujian_id: Number(selectedUjian), pertanyaan: form.pertanyaan, gambar: form.gambar || null, opsi: form.opsi, jawaban: form.jawaban }) });
+        }
+        await onRefresh();
+        setSoalList(prev => [...prev, soalBaru]);
+        resetForm();
       }
-      await onRefresh();
-      setSoalList(prev => [...prev, soalBaru]);
-      setForm({ pertanyaan: "", gambar: "", opsi: ["","","",""], jawaban: 0 });
     } catch(e) { alert("Gagal menyimpan: " + e.message); }
     setSaving(false);
+  };
+
+  const handleEdit = (s) => {
+    setEditSoal(s);
+    setForm({ pertanyaan: s.pertanyaan, gambar: s.gambar || "", opsi: [...s.opsi], jawaban: s.jawaban });
+    setUploadMode("manual");
+    window.scrollTo(0, 400);
   };
 
   const handleDelete = async (soalId) => {
@@ -775,7 +951,25 @@ function SoalPage({ ujianList, onRefresh }) {
       }
       await onRefresh();
       setSoalList(prev => prev.filter(s => s.id !== soalId));
+      if (editSoal?.id === soalId) resetForm();
     } catch(e) { alert("Gagal hapus: " + e.message); }
+  };
+
+  const handleHapusSemua = async () => {
+    setSaving(true);
+    try {
+      if (useDemo) {
+        const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
+        if (idx > -1) DEMO_UJIAN[idx].soal = [];
+      } else {
+        await supabase(`soal?ujian_id=eq.${selectedUjian}`, { method: "DELETE" });
+      }
+      await onRefresh();
+      setSoalList([]);
+      setHapusSemua(false);
+      resetForm();
+    } catch(e) { alert("Gagal hapus: " + e.message); }
+    setSaving(false);
   };
 
   // ── EXCEL PARSER ──────────────────────────────────────────
@@ -959,8 +1153,19 @@ function SoalPage({ ujianList, onRefresh }) {
 
           {/* MODE: MANUAL */}
           {uploadMode === "manual" && (
-            <div className="card">
-              <div className="card-header"><h2>✏️ Tambah Soal Manual</h2><span className="badge badge-blue">{soalList.length} soal</span></div>
+            <div className="card" style={{border: editSoal ? "2px solid var(--yellow)" : "1px solid var(--border)"}}>
+              <div className="card-header">
+                <h2>{editSoal ? "✏️ Edit Soal" : "✏️ Tambah Soal Manual"}</h2>
+                <div style={{display:"flex", gap:"8px", alignItems:"center"}}>
+                  <span className="badge badge-blue">{soalList.length} soal</span>
+                  {editSoal && <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={resetForm}>✕ Batal Edit</button>}
+                </div>
+              </div>
+              {editSoal && (
+                <div style={{background:"var(--yellow3)", borderRadius:"var(--radius2)", padding:"10px 14px", marginBottom:"16px", fontSize:"13px", color:"#92400e", fontWeight:"600"}}>
+                  ✏️ Mode Edit — Anda sedang mengedit Soal {soalList.findIndex(s => s.id === editSoal.id) + 1}
+                </div>
+              )}
               <div className="form-field">
                 <label>Pertanyaan</label>
                 <textarea value={form.pertanyaan} onChange={e => setForm(p=>({...p, pertanyaan:e.target.value}))} placeholder="Tulis pertanyaan di sini..." rows={3} />
@@ -988,8 +1193,11 @@ function SoalPage({ ujianList, onRefresh }) {
                   <button className={`btn ${form.jawaban === i ? "btn-green" : "btn-ghost"}`} onClick={() => setForm(p=>({...p, jawaban:i}))}>✓</button>
                 </div>
               ))}
-              <div style={{marginTop:"16px"}}>
-                <button className="btn btn-blue" onClick={handleSave} disabled={saving}>{saving?"Menyimpan...":"💾 Simpan Soal"}</button>
+              <div style={{marginTop:"16px", display:"flex", gap:"8px"}}>
+                <button className="btn btn-blue" onClick={handleSave} disabled={saving}>
+                  {saving ? "Menyimpan..." : editSoal ? "💾 Simpan Perubahan" : "💾 Simpan Soal"}
+                </button>
+                {editSoal && <button className="btn btn-ghost" onClick={resetForm}>✕ Batal</button>}
               </div>
             </div>
           )}
@@ -1107,15 +1315,28 @@ function SoalPage({ ujianList, onRefresh }) {
           )}
 
           <div className="card">
-            <div className="card-header"><h2>📝 Daftar Soal</h2><span className="badge badge-blue">{soalList.length} soal</span></div>
+            <div className="card-header">
+              <h2>📝 Daftar Soal</h2>
+              <div style={{display:"flex", gap:"8px", alignItems:"center"}}>
+                <span className="badge badge-blue">{soalList.length} soal</span>
+                {soalList.length > 0 && (
+                  <button className="btn btn-red" style={{fontSize:"12px"}} onClick={() => setHapusSemua(true)}>🗑️ Hapus Semua</button>
+                )}
+              </div>
+            </div>
             {soalList.length === 0 ? (
               <div className="empty-state"><div className="icon">✏️</div><p>Belum ada soal. Tambahkan soal di atas.</p></div>
             ) : (
               soalList.map((s, idx) => (
-                <div key={s.id} style={{border:"1px solid var(--border)", borderRadius:"var(--radius2)", padding:"16px", marginBottom:"12px"}}>
+                <div key={s.id} style={{border:`2px solid ${editSoal?.id === s.id ? "var(--yellow)" : "var(--border)"}`, borderRadius:"var(--radius2)", padding:"16px", marginBottom:"12px", background: editSoal?.id === s.id ? "var(--yellow3)" : "white"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
                     <div style={{flex:1}}>
-                      <div style={{fontSize:"12px", fontWeight:"700", color:"var(--blue)", marginBottom:"6px"}}>SOAL {idx+1}</div>
+                      <div style={{fontSize:"12px", fontWeight:"700", color:"var(--blue)", marginBottom:"6px"}}>SOAL {idx+1} {editSoal?.id === s.id ? "— ✏️ Sedang Diedit" : ""}</div>
+                      {s.gambar && (
+                        <div style={{marginBottom:"8px", borderRadius:"6px", overflow:"hidden", border:"1px solid var(--border)", maxHeight:"120px", display:"flex", alignItems:"center", background:"var(--light)"}}>
+                          <img src={s.gambar} alt="gambar soal" style={{maxHeight:"120px", objectFit:"contain", width:"100%"}} onError={e => e.target.style.display="none"} />
+                        </div>
+                      )}
                       <div style={{fontSize:"14px", fontWeight:"500", marginBottom:"10px"}}>{s.pertanyaan}</div>
                       <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
                         {s.opsi.map((o,i) => (
@@ -1125,12 +1346,35 @@ function SoalPage({ ujianList, onRefresh }) {
                         ))}
                       </div>
                     </div>
-                    <button className="btn btn-red" onClick={() => handleDelete(s.id)} style={{marginLeft:"12px"}}>🗑️</button>
+                    <div style={{display:"flex", flexDirection:"column", gap:"6px", marginLeft:"12px"}}>
+                      <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => handleEdit(s)}>✏️ Edit</button>
+                      <button className="btn btn-red" style={{fontSize:"12px"}} onClick={() => handleDelete(s.id)}>🗑️</button>
+                    </div>
                   </div>
                 </div>
               ))
             )}
           </div>
+
+          {/* Modal Konfirmasi Hapus Semua */}
+          {hapusSemua && (
+            <div className="modal-overlay">
+              <div className="modal">
+                <div style={{fontSize:"48px", textAlign:"center", marginBottom:"12px"}}>⚠️</div>
+                <h2 style={{textAlign:"center"}}>Hapus Semua Soal?</h2>
+                <p style={{textAlign:"center", color:"var(--gray)"}}>Semua <strong>{soalList.length} soal</strong> pada ujian ini akan dihapus permanen.</p>
+                <div style={{background:"var(--red3)", borderRadius:"var(--radius2)", padding:"10px", margin:"16px 0", fontSize:"13px", color:"var(--red2)", fontWeight:"600", textAlign:"center"}}>
+                  ❌ Tindakan ini tidak bisa dibatalkan!
+                </div>
+                <div style={{display:"flex", gap:"8px"}}>
+                  <button className="btn btn-red" style={{flex:1, padding:"12px"}} onClick={handleHapusSemua} disabled={saving}>
+                    {saving ? "Menghapus..." : "🗑️ Ya, Hapus Semua"}
+                  </button>
+                  <button className="btn btn-ghost" style={{flex:1, padding:"12px"}} onClick={() => setHapusSemua(false)}>Batal</button>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
     </>
@@ -1139,102 +1383,167 @@ function SoalPage({ ujianList, onRefresh }) {
 
 // ---- Monitor Ujian & Buka Kunci ----
 function MonitorPage({ ujianList }) {
-  const [selectedUjian, setSelectedUjian] = useState("");
-  const [pesertaAktif, setPesertaAktif] = useState([]);
-  const [unlockedSiswa, setUnlockedSiswa] = useState([]); // daftar siswa yang dibuka kuncinya
+  const [hasilLive, setHasilLive] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(new Date());
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [unlockedSiswa, setUnlockedSiswa] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("unlocked_siswa") || "[]"); } catch { return []; }
+  });
 
-  // Simpan daftar siswa yang dibuka kunci di localStorage agar persist
-  useEffect(() => {
-    const saved = localStorage.getItem("unlocked_siswa");
-    if (saved) setUnlockedSiswa(JSON.parse(saved));
+  const loadHasil = useCallback(async () => {
+    setLoading(true);
+    try {
+      if (!useDemo) {
+        const data = await supabase("hasil?order=id.desc");
+        setHasilLive(data);
+      } else {
+        setHasilLive([...DEMO_HASIL]);
+      }
+      setLastRefresh(new Date());
+    } catch(e) { console.error(e); }
+    setLoading(false);
   }, []);
+
+  useEffect(() => { loadHasil(); }, [loadHasil]);
+
+  // Auto-refresh setiap 10 detik
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const t = setInterval(loadHasil, 10000);
+    return () => clearInterval(t);
+  }, [autoRefresh, loadHasil]);
 
   const saveUnlocked = (list) => {
     setUnlockedSiswa(list);
     localStorage.setItem("unlocked_siswa", JSON.stringify(list));
   };
 
-  const bukаKunci = (nama, kelas) => {
+  const bukaKunci = (nama, kelas) => {
     const key = `${nama}_${kelas}`;
-    const updated = [...unlockedSiswa.filter(k => k !== key), key];
-    saveUnlocked(updated);
-    alert(`✅ Kunci ujian ${nama} (${kelas}) berhasil dibuka!\nSiswa bisa masuk ulang dengan kode ujian yang sama.`);
+    saveUnlocked([...unlockedSiswa.filter(k => k !== key), key]);
+    alert(`✅ Kunci ujian ${nama} (${kelas}) berhasil dibuka!\nMinta siswa refresh browser dan masuk ulang.`);
   };
 
-  const resetKunci = (nama, kelas) => {
-    const key = `${nama}_${kelas}`;
-    saveUnlocked(unlockedSiswa.filter(k => k !== key));
-  };
+  // Statistik
+  const totalSiswa = hasilLive.length;
+  const sudahSelesai = hasilLive.length;
+  const curiga = hasilLive.filter(h => h.mencurigakan).length;
+  const rataRata = totalSiswa > 0 ? Math.round(hasilLive.reduce((a,h) => a + (h.nilai||0), 0) / totalSiswa) : 0;
 
   return (
     <>
       <div className="page-header">
-        <h1>🖥️ Monitor Ujian</h1>
-        <p>Pantau siswa aktif & buka kunci ujian yang terkunci</p>
+        <h1>🖥️ Monitor Ujian Live</h1>
+        <p>Pantau aktivitas siswa secara real-time</p>
       </div>
 
-      {/* Info cara kerja */}
-      <div style={{background:"var(--blue3)", borderRadius:"var(--radius)", padding:"16px 20px", marginBottom:"20px", display:"flex", gap:"12px", alignItems:"flex-start"}}>
-        <div style={{fontSize:"24px"}}>ℹ️</div>
-        <div>
-          <div style={{fontWeight:"700", color:"var(--blue2)", marginBottom:"4px"}}>Cara Buka Kunci Siswa Terkunci</div>
-          <div style={{fontSize:"13px", color:"var(--navy3)", lineHeight:"1.7"}}>
-            1. Cari nama siswa di bawah → klik <strong>🔓 Buka Kunci</strong><br/>
-            2. Minta siswa <strong>refresh halaman (F5)</strong> atau tutup browser dan buka lagi<br/>
-            3. Siswa masuk ulang dengan nama, kelas, dan kode ujian yang sama<br/>
-            4. Ujian lanjut dari awal (jawaban sebelumnya tidak tersimpan)
+      {/* Status bar */}
+      <div style={{display:"flex", gap:"12px", marginBottom:"20px", flexWrap:"wrap"}}>
+        {[
+          { icon:"✅", label:"Sudah Submit", val:sudahSelesai, bg:"var(--green3)", color:"var(--green2)" },
+          { icon:"🚨", label:"Mencurigakan", val:curiga, bg:"var(--red3)", color:"var(--red2)" },
+          { icon:"⭐", label:"Rata-rata Nilai", val:rataRata, bg:"var(--blue3)", color:"var(--blue2)" },
+        ].map((s,i) => (
+          <div key={i} style={{background:s.bg, borderRadius:"var(--radius)", padding:"16px 20px", flex:"1", minWidth:"140px"}}>
+            <div style={{fontSize:"22px", fontWeight:"800", color:s.color, fontFamily:"var(--mono)"}}>{s.icon} {s.val}</div>
+            <div style={{fontSize:"12px", color:s.color, marginTop:"4px"}}>{s.label}</div>
+          </div>
+        ))}
+        <div style={{background:"white", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:"16px 20px", flex:"1", minWidth:"160px", display:"flex", flexDirection:"column", gap:"8px"}}>
+          <div style={{display:"flex", alignItems:"center", gap:"8px"}}>
+            <div style={{width:"8px", height:"8px", borderRadius:"50%", background: autoRefresh ? "var(--green)" : "var(--gray)", animation: autoRefresh ? "pulse 1.5s infinite" : "none"}}></div>
+            <span style={{fontSize:"13px", fontWeight:"600"}}>{autoRefresh ? "Auto Refresh ON" : "Auto Refresh OFF"}</span>
+          </div>
+          <div style={{fontSize:"11px", color:"var(--gray)"}}>Update: {lastRefresh.toLocaleTimeString('id-ID')}</div>
+          <div style={{display:"flex", gap:"6px"}}>
+            <button className="btn btn-blue" style={{fontSize:"11px", padding:"4px 10px"}} onClick={loadHasil} disabled={loading}>
+              {loading ? "..." : "🔄 Refresh"}
+            </button>
+            <button className={`btn ${autoRefresh ? "btn-red" : "btn-green"}`} style={{fontSize:"11px", padding:"4px 10px"}} onClick={() => setAutoRefresh(v => !v)}>
+              {autoRefresh ? "⏸ Pause" : "▶ Auto"}
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Daftar siswa yang sedang terkunci (dari hasil ujian yang belum selesai) */}
-      <div className="card">
-        <div className="card-header">
-          <h2>🔒 Siswa yang Perlu Dibuka Kunci</h2>
-          <button className="btn btn-ghost" onClick={() => setLastRefresh(new Date())} style={{fontSize:"12px"}}>
-            🔄 Refresh — {lastRefresh.toLocaleTimeString('id-ID')}
-          </button>
-        </div>
-
-        <div style={{background:"var(--yellow3)", borderRadius:"var(--radius2)", padding:"12px 16px", marginBottom:"16px", fontSize:"13px", color:"#92400e"}}>
-          💡 Siswa yang ujiannya terkunci akan datang melapor ke Anda. Cari namanya di bawah lalu klik Buka Kunci.
-        </div>
-
-        {/* Form manual buka kunci */}
-        <BukaKunciManual onBukaKunci={bukаKunci} />
-      </div>
-
-      {/* Riwayat buka kunci */}
-      {unlockedSiswa.length > 0 && (
-        <div className="card">
-          <div className="card-header">
-            <h2>✅ Riwayat Buka Kunci Hari Ini</h2>
-            <button className="btn btn-red" onClick={() => saveUnlocked([])}>🗑️ Hapus Riwayat</button>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>#</th><th>Nama Siswa</th><th>Kelas</th><th>Status</th><th>Aksi</th></tr></thead>
-              <tbody>
-                {unlockedSiswa.map((key, i) => {
-                  const [nama, kelas] = key.split("_");
-                  return (
-                    <tr key={i}>
-                      <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
-                      <td><strong>{nama}</strong></td>
-                      <td>{kelas}</td>
-                      <td><span className="badge badge-green">✅ Sudah Dibuka</span></td>
-                      <td>
-                        <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => resetKunci(nama, kelas)}>Hapus</button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      {/* Alert mencurigakan */}
+      {curiga > 0 && (
+        <div style={{background:"var(--red3)", border:"1px solid var(--red)", borderRadius:"var(--radius)", padding:"14px 18px", marginBottom:"16px", display:"flex", alignItems:"center", gap:"12px"}}>
+          <div style={{fontSize:"20px"}}>🚨</div>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:"700", color:"var(--red2)"}}>Terdeteksi {curiga} siswa mencurigakan!</div>
+            <div style={{fontSize:"12px", color:"var(--red2)", opacity:0.8}}>Lihat detail di tabel bawah — kolom Pelanggaran.</div>
           </div>
         </div>
       )}
+
+      {/* Tabel hasil live */}
+      <div className="card">
+        <div className="card-header">
+          <h2>📊 Rekap Siswa ({totalSiswa})</h2>
+        </div>
+        {hasilLive.length === 0 ? (
+          <div className="empty-state">
+            <div className="icon">⏳</div>
+            <p>Belum ada siswa yang submit. Halaman ini auto-refresh setiap 10 detik.</p>
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>#</th><th>Nama</th><th>Kelas</th><th>Mapel</th><th>Nilai</th><th>Status</th><th>Pelanggaran</th></tr>
+              </thead>
+              <tbody>
+                {hasilLive.map((h, i) => (
+                  <tr key={i} style={{background: h.mencurigakan ? "#fff5f5" : ""}}>
+                    <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
+                    <td>
+                      <strong>{h.nama_siswa}</strong>
+                      {h.mencurigakan && <span style={{marginLeft:"6px", fontSize:"10px", color:"var(--red2)", fontWeight:"700", background:"var(--red3)", padding:"1px 6px", borderRadius:"99px"}}>⚠️ Curiga</span>}
+                    </td>
+                    <td>{h.kelas}</td>
+                    <td>{h.mapel}</td>
+                    <td><strong style={{fontFamily:"var(--mono)", color: h.nilai>=75?"var(--green2)":"var(--red2)"}}>{h.nilai}</strong></td>
+                    <td><span className={`badge ${h.nilai>=75?"badge-green":"badge-red"}`}>{h.nilai>=75?"Lulus":"Remedi"}</span></td>
+                    <td>
+                      {(h.pelanggaran||0) === 0
+                        ? <span style={{color:"var(--green2)", fontSize:"12px"}}>✅ Bersih</span>
+                        : <span style={{color:"var(--red2)", fontSize:"12px", fontWeight:"700"}}>⚠️ {h.pelanggaran}x</span>
+                      }
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Buka Kunci */}
+      <div className="card">
+        <div className="card-header"><h2>🔓 Buka Kunci Siswa</h2></div>
+        <div style={{background:"var(--blue3)", borderRadius:"var(--radius2)", padding:"12px 16px", marginBottom:"16px", fontSize:"13px", color:"var(--navy3)"}}>
+          ℹ️ Jika ada siswa yang ujiannya terkunci (3x pelanggaran), isi nama dan kelas di bawah lalu klik Buka Kunci. Minta siswa refresh browser dan masuk ulang.
+        </div>
+        <BukaKunciManual onBukaKunci={bukaKunci} />
+        {unlockedSiswa.length > 0 && (
+          <div style={{marginTop:"16px"}}>
+            <div style={{fontSize:"13px", fontWeight:"700", marginBottom:"8px"}}>Riwayat Buka Kunci:</div>
+            <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+              {unlockedSiswa.map((key, i) => {
+                const [nama, kelas] = key.split("_");
+                return (
+                  <div key={i} style={{background:"var(--green3)", padding:"4px 12px", borderRadius:"99px", fontSize:"12px", color:"var(--green2)", fontWeight:"600"}}>
+                    ✅ {nama} ({kelas})
+                  </div>
+                );
+              })}
+            </div>
+            <button className="btn btn-ghost" style={{fontSize:"12px", marginTop:"8px"}} onClick={() => saveUnlocked([])}>Hapus Riwayat</button>
+          </div>
+        )}
+      </div>
     </>
   );
 }
@@ -1250,13 +1559,11 @@ function BukaKunciManual({ onBukaKunci }) {
     onBukaKunci(nama.trim(), kelas.trim());
     setSuccess(true);
     setTimeout(() => setSuccess(false), 3000);
-    setNama("");
-    setKelas("");
+    setNama(""); setKelas("");
   };
 
   return (
     <div style={{background:"var(--light)", borderRadius:"var(--radius)", padding:"20px"}}>
-      <h3 style={{fontSize:"14px", fontWeight:"700", marginBottom:"16px", color:"var(--navy)"}}>🔓 Buka Kunci Ujian Siswa</h3>
       <div style={{display:"flex", gap:"12px", flexWrap:"wrap", alignItems:"flex-end"}}>
         <div className="form-field" style={{flex:"1", minWidth:"160px", marginBottom:0}}>
           <label>Nama Siswa</label>
@@ -1266,9 +1573,7 @@ function BukaKunciManual({ onBukaKunci }) {
           <label>Kelas</label>
           <input value={kelas} onChange={e => setKelas(e.target.value)} placeholder="Contoh: VII A" />
         </div>
-        <button className="btn btn-green" style={{padding:"10px 20px", height:"42px"}} onClick={handleBuka}>
-          🔓 Buka Kunci
-        </button>
+        <button className="btn btn-green" style={{padding:"10px 20px", height:"42px"}} onClick={handleBuka}>🔓 Buka Kunci</button>
       </div>
       {success && (
         <div style={{marginTop:"12px", padding:"10px 14px", background:"var(--green3)", borderRadius:"var(--radius2)", fontSize:"13px", color:"var(--green2)", fontWeight:"600"}}>
@@ -1394,8 +1699,11 @@ function StudentExam({ data, onFinish }) {
   const [warningMsg, setWarningMsg] = useState("");
   const [locked, setLocked] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [submitStatus, setSubmitStatus] = useState(""); // "", "queued", "saving", "done", "error"
+  const [submitStatus, setSubmitStatus] = useState("");
   const [queuePos, setQueuePos] = useState(null);
+  const [timerPaused, setTimerPaused] = useState(false); // pause saat layar mati
+  const hiddenSinceRef = React.useRef(null); // waktu layar mulai gelap
+  const VIOLATION_THRESHOLD_MS = 5000; // 5 detik — lebih dari ini = pelanggaran
   const MAX_VIOLATIONS = 3;
 
   // ── Fullscreen ──────────────────────────────────────────────
@@ -1433,21 +1741,39 @@ function StudentExam({ data, onFinish }) {
     };
   }, [submitting]);
 
-  // ── Deteksi pindah tab ──────────────────────────────────────
+  // ── Deteksi pindah tab vs layar mati ───────────────────────
+  // Logika: catat waktu layar gelap. Saat kembali, cek durasinya.
+  // Jika < 5 detik → kemungkinan layar mati (tidak dihitung pelanggaran, timer di-pause)
+  // Jika >= 5 detik → kemungkinan berpindah tab (dihitung pelanggaran)
   useEffect(() => {
     const onVisibility = () => {
       if (document.hidden && !submitting) {
-        setTabViolation(v => {
-          const nv = v + 1;
-          if (nv >= MAX_VIOLATIONS) {
-            setLocked(true);
-            setWarningMsg(`🔒 Ujian dikunci! Anda berpindah tab ${nv}x. Hubungi pengawas.`);
-          } else {
-            setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Terdeteksi meninggalkan halaman ujian!`);
+        // Layar mulai gelap / tab disembunyikan
+        hiddenSinceRef.current = Date.now();
+        setTimerPaused(true); // pause timer dulu
+      } else if (!document.hidden && !submitting) {
+        // Layar menyala kembali / kembali ke tab
+        setTimerPaused(false); // lanjutkan timer
+        if (hiddenSinceRef.current) {
+          const durasi = Date.now() - hiddenSinceRef.current;
+          hiddenSinceRef.current = null;
+          if (durasi >= VIOLATION_THRESHOLD_MS) {
+            // Berpindah tab / aplikasi lain (lebih dari 5 detik)
+            setTabViolation(v => {
+              const nv = v + 1;
+              if (nv >= MAX_VIOLATIONS) {
+                setLocked(true);
+                setWarningMsg(`🔒 Ujian dikunci! Anda terdeteksi meninggalkan ujian ${nv}x. Hubungi pengawas.`);
+              } else {
+                setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Anda terdeteksi meninggalkan halaman ujian selama ${Math.round(durasi/1000)} detik!`);
+              }
+              setShowWarning(true);
+              return nv;
+            });
           }
-          setShowWarning(true);
-          return nv;
-        });
+          // Jika < 5 detik: layar mati sebentar, tidak dihitung pelanggaran
+          // Timer sudah dilanjutkan otomatis di atas
+        }
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
@@ -1470,9 +1796,9 @@ function StudentExam({ data, onFinish }) {
     };
   }, []);
 
-  // ── Timer ───────────────────────────────────────────────────
+  // ── Timer (pause saat layar mati) ──────────────────────────
   useEffect(() => {
-    if (locked || submitting) return;
+    if (locked || submitting || timerPaused) return;
     const t = setInterval(() => {
       setTimeLeft(prev => {
         if (prev <= 1) { clearInterval(t); handleSubmit(true); return 0; }
@@ -1480,7 +1806,7 @@ function StudentExam({ data, onFinish }) {
       });
     }, 1000);
     return () => clearInterval(t);
-  }, [locked, submitting]);
+  }, [locked, submitting, timerPaused]);
 
   // ── Submit dengan Antrian ───────────────────────────────────
   const handleSubmit = useCallback(async (auto = false) => {
@@ -1646,7 +1972,10 @@ function StudentExam({ data, onFinish }) {
           <div style={{background:isFullscreen?"rgba(34,197,94,0.2)":"rgba(239,68,68,0.2)",borderRadius:"8px",padding:"4px 10px",fontSize:"12px",color:isFullscreen?"#86efac":"#fca5a5",cursor:"pointer"}} onClick={enterFullscreen}>
             {isFullscreen ? "🔒 Fullscreen" : "⚠️ Klik Fullscreen"}
           </div>
-          <div className={`cbt-timer ${isDanger ? "danger" : ""}`}>⏱ {formatTime(timeLeft)}</div>
+          <div className={`cbt-timer ${isDanger && !timerPaused ? "danger" : ""}`}
+            style={timerPaused ? {background:"rgba(251,191,36,0.3)",color:"#fcd34d"} : {}}>
+            {timerPaused ? "⏸ Timer Dijeda" : `⏱ ${formatTime(timeLeft)}`}
+          </div>
         </div>
       </div>
 
