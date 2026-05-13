@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 
 // ============================================================
 // SUPABASE CONFIG — Ganti dengan kredensial Supabase Anda
@@ -1702,7 +1702,7 @@ function StudentExam({ data, onFinish }) {
   const [submitStatus, setSubmitStatus] = useState("");
   const [queuePos, setQueuePos] = useState(null);
   const [timerPaused, setTimerPaused] = useState(false); // pause saat layar mati
-  const hiddenSinceRef = React.useRef(null); // waktu layar mulai gelap
+  const hiddenSinceRef = useRef(null); // waktu layar mulai gelap
   const VIOLATION_THRESHOLD_MS = 5000; // 5 detik — lebih dari ini = pelanggaran
   const MAX_VIOLATIONS = 3;
 
