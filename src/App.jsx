@@ -1664,16 +1664,40 @@ function MonitorPage({ ujianList }) {
                         </span>
                       </td>
                       <td>
-                        {(p.pelanggaran||0) === 0
-                          ? <span style={{color:"var(--green2)", fontSize:"12px"}}>✅ Bersih</span>
-                          : <span style={{color:"var(--red2)", fontSize:"12px", fontWeight:"700"}} title={
-                              Array.isArray(p.riwayat_pelanggaran)
-                                ? p.riwayat_pelanggaran.map(r => `${new Date(r.waktu).toLocaleTimeString('id-ID')} - ${r.jenis}`).join('\n')
-                                : ''
-                            }>
-                              ⚠️ {p.pelanggaran}x
-                            </span>
-                        }
+                        {(() => {
+                          const riwayat = Array.isArray(p.riwayat_pelanggaran) ? p.riwayat_pelanggaran : [];
+                          const pelanggaranCount = p.pelanggaran || 0;
+                          const warningCount = riwayat.filter(r => r.level === "warning").length;
+
+                          // Format tooltip detail
+                          const tooltip = riwayat.length > 0
+                            ? riwayat.map(r => {
+                                const jam = new Date(r.waktu).toLocaleTimeString('id-ID');
+                                const dur = r.durasi_detik ? ` (${r.durasi_detik}dtk)` : '';
+                                const label = r.level === "warning" ? "⚠️ WARN" : "🔴 PELANGGARAN";
+                                return `${jam} ${label} - ${r.jenis}${dur}`;
+                              }).join('\n')
+                            : '';
+
+                          if (pelanggaranCount === 0 && warningCount === 0) {
+                            return <span style={{color:"var(--green2)", fontSize:"12px"}}>✅ Bersih</span>;
+                          }
+
+                          return (
+                            <div style={{display:"flex", flexDirection:"column", gap:"3px"}} title={tooltip}>
+                              {pelanggaranCount > 0 && (
+                                <span style={{color:"var(--red2)", fontSize:"12px", fontWeight:"700"}}>
+                                  🔴 {pelanggaranCount}x pelanggaran
+                                </span>
+                              )}
+                              {warningCount > 0 && (
+                                <span style={{color:"#b45309", fontSize:"11px", fontWeight:"600"}}>
+                                  ⚠️ {warningCount}x warning
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td style={{fontSize:"12px", color:"var(--gray)", fontFamily:"var(--mono)"}}>{mulai}</td>
                     </tr>
@@ -1912,7 +1936,12 @@ function StudentExam({ data, onFinish }) {
   const hiddenSinceRef = useRef(null); // waktu layar mulai gelap
   const pesertaAktifIdRef = useRef(null); // ID record di tabel peserta_aktif
   const riwayatPelanggaranRef = useRef([]); // log pelanggaran untuk dikirim ke monitor
-  const VIOLATION_THRESHOLD_MS = 5000; // 5 detik — lebih dari ini = pelanggaran
+  const wakeLockRef = useRef(null); // Wake Lock sentinel untuk paksa layar tetap nyala
+  const [wakeLockAktif, setWakeLockAktif] = useState(false); // status wake lock untuk UI
+  // Threshold bertingkat untuk membedakan screen timeout HP vs cheating
+  const ABAIKAN_MS = 30000;        // < 30 detik = diabaikan (screen timeout normal)
+  const WARNING_MS = 90000;        // 30-90 detik = warning (log saja, tidak hitung pelanggaran)
+                                   // > 90 detik = pelanggaran (hitung +1)
   const MAX_VIOLATIONS = 3;
 
   // ── Fullscreen ──────────────────────────────────────────────
@@ -1923,12 +1952,66 @@ function StudentExam({ data, onFinish }) {
     setIsFullscreen(true);
   };
 
+  // ── Wake Lock: paksa layar HP tetap menyala selama ujian ────
+  // Mencegah screen timeout otomatis yang akan ter-trigger sebagai pelanggaran
+  // Didukung: Chrome Android 84+, Edge, Safari iOS 16.4+
+  useEffect(() => {
+    if (locked || submitting) return;
+
+    const acquireWakeLock = async () => {
+      if (!('wakeLock' in navigator)) {
+        // Browser tidak support — biarkan saja, threshold longgar akan toleran
+        return;
+      }
+      try {
+        const sentinel = await navigator.wakeLock.request('screen');
+        wakeLockRef.current = sentinel;
+        setWakeLockAktif(true);
+        // Wake lock bisa di-release otomatis oleh browser (mis. tab hidden)
+        sentinel.addEventListener('release', () => {
+          wakeLockRef.current = null;
+          setWakeLockAktif(false);
+        });
+      } catch (e) {
+        // User mungkin reject, battery saver, dll. Silent fail.
+        console.warn("Wake Lock tidak tersedia:", e.message);
+      }
+    };
+
+    acquireWakeLock();
+
+    // Re-acquire saat tab kembali visible (wake lock auto-release saat hidden)
+    const onVisibilityForWakeLock = () => {
+      if (!document.hidden && !wakeLockRef.current) {
+        acquireWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityForWakeLock);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityForWakeLock);
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => {});
+        wakeLockRef.current = null;
+      }
+    };
+  }, [locked, submitting]);
+
   useEffect(() => {
     enterFullscreen();
     const onFsChange = () => {
       const fs = !!(document.fullscreenElement || document.webkitFullscreenElement);
       setIsFullscreen(fs);
       if (!fs && !submitting) {
+        // Catat di riwayat detail
+        riwayatPelanggaranRef.current = [
+          ...riwayatPelanggaranRef.current,
+          {
+            waktu: new Date().toISOString(),
+            level: "pelanggaran",
+            jenis: "keluar_fullscreen",
+          },
+        ];
         setTabViolation(v => {
           const nv = v + 1;
           if (nv >= MAX_VIOLATIONS) {
@@ -1950,10 +2033,10 @@ function StudentExam({ data, onFinish }) {
     };
   }, [submitting]);
 
-  // ── Deteksi pindah tab vs layar mati ───────────────────────
-  // Logika: catat waktu layar gelap. Saat kembali, cek durasinya.
-  // Jika < 5 detik → kemungkinan layar mati (tidak dihitung pelanggaran, timer di-pause)
-  // Jika >= 5 detik → kemungkinan berpindah tab (dihitung pelanggaran)
+  // ── Deteksi pindah tab vs layar mati (THRESHOLD BERTINGKAT) ─
+  // < 30 detik  → diabaikan (screen timeout normal HP, siswa berpikir)
+  // 30-90 detik → warning (dicatat di log, tidak hitung pelanggaran)
+  // > 90 detik  → pelanggaran (hitung +1, kunci kalau sudah 3x)
   useEffect(() => {
     const onVisibility = () => {
       if (document.hidden && !submitting) {
@@ -1965,23 +2048,51 @@ function StudentExam({ data, onFinish }) {
         setTimerPaused(false); // lanjutkan timer
         if (hiddenSinceRef.current) {
           const durasi = Date.now() - hiddenSinceRef.current;
+          const durasiDetik = Math.round(durasi / 1000);
           hiddenSinceRef.current = null;
-          if (durasi >= VIOLATION_THRESHOLD_MS) {
-            // Berpindah tab / aplikasi lain (lebih dari 5 detik)
-            setTabViolation(v => {
-              const nv = v + 1;
-              if (nv >= MAX_VIOLATIONS) {
-                setLocked(true);
-                setWarningMsg(`🔒 Ujian dikunci! Anda terdeteksi meninggalkan ujian ${nv}x. Hubungi pengawas.`);
-              } else {
-                setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Anda terdeteksi meninggalkan halaman ujian selama ${Math.round(durasi/1000)} detik!`);
-              }
-              setShowWarning(true);
-              return nv;
-            });
+
+          if (durasi < ABAIKAN_MS) {
+            // < 30 detik: kemungkinan besar screen timeout / siswa berpikir
+            // Tidak dicatat sama sekali — terlalu sering kalau dicatat
+            return;
           }
-          // Jika < 5 detik: layar mati sebentar, tidak dihitung pelanggaran
-          // Timer sudah dilanjutkan otomatis di atas
+
+          if (durasi < WARNING_MS) {
+            // 30-90 detik: WARNING — dicatat di log untuk dilihat guru,
+            // tapi tidak menambah counter pelanggaran
+            riwayatPelanggaranRef.current = [
+              ...riwayatPelanggaranRef.current,
+              {
+                waktu: new Date().toISOString(),
+                durasi_detik: durasiDetik,
+                level: "warning",
+                jenis: "layar_gelap",
+              },
+            ];
+            return;
+          }
+
+          // > 90 detik: PELANGGARAN sungguhan
+          riwayatPelanggaranRef.current = [
+            ...riwayatPelanggaranRef.current,
+            {
+              waktu: new Date().toISOString(),
+              durasi_detik: durasiDetik,
+              level: "pelanggaran",
+              jenis: "tinggalkan_ujian",
+            },
+          ];
+          setTabViolation(v => {
+            const nv = v + 1;
+            if (nv >= MAX_VIOLATIONS) {
+              setLocked(true);
+              setWarningMsg(`🔒 Ujian dikunci! Anda terdeteksi meninggalkan ujian ${nv}x. Hubungi pengawas.`);
+            } else {
+              setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Anda meninggalkan halaman ujian selama ${durasiDetik} detik!`);
+            }
+            setShowWarning(true);
+            return nv;
+          });
         }
       }
     };
@@ -2118,16 +2229,6 @@ function StudentExam({ data, onFinish }) {
       clearInterval(t);
     };
   }, []); // empty deps — interval dibuat sekali saja
-
-  // 4) Catat riwayat pelanggaran (untuk dilihat guru)
-  useEffect(() => {
-    if (tabViolation > 0 && riwayatPelanggaranRef.current.length < tabViolation) {
-      riwayatPelanggaranRef.current = [
-        ...riwayatPelanggaranRef.current,
-        { waktu: new Date().toISOString(), jenis: "keluar_fullscreen_atau_tab" },
-      ];
-    }
-  }, [tabViolation]);
 
   // ── Submit dengan Antrian ───────────────────────────────────
   const handleSubmit = useCallback(async (auto = false) => {
@@ -2310,6 +2411,11 @@ function StudentExam({ data, onFinish }) {
           <div style={{background:isFullscreen?"rgba(34,197,94,0.2)":"rgba(239,68,68,0.2)",borderRadius:"8px",padding:"4px 10px",fontSize:"12px",color:isFullscreen?"#86efac":"#fca5a5",cursor:"pointer"}} onClick={enterFullscreen}>
             {isFullscreen ? "🔒 Fullscreen" : "⚠️ Klik Fullscreen"}
           </div>
+          {wakeLockAktif && (
+            <div title="Layar HP dipaksa tetap menyala selama ujian" style={{background:"rgba(59,130,246,0.2)",borderRadius:"8px",padding:"4px 10px",fontSize:"12px",color:"#93c5fd"}}>
+              🔆 Layar Aktif
+            </div>
+          )}
           <div className={`cbt-timer ${isDanger && !timerPaused ? "danger" : ""}`}
             style={timerPaused ? {background:"rgba(251,191,36,0.3)",color:"#fcd34d"} : {}}>
             {timerPaused ? "⏸ Timer Dijeda" : `⏱ ${formatTime(timeLeft)}`}
