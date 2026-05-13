@@ -101,7 +101,7 @@ function shuffleSoalDanOpsi(soalAsli) {
 // ============================================================
 const MAPEL = [
   "Matematika","Bahasa Indonesia","Bahasa Inggris","IPA","IPS",
-  "PKn","Agama","Informatika","PJOK","Prakarya",
+  "PKN","Agama"," Informatika","PJOK","Prakarya",
 ];
 
 const GURU_ACCOUNTS = [
@@ -379,6 +379,7 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
   const [form, setForm] = useState({ username: "", password: "", nama: "", kelas: "", examKey: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showPass, setShowPass] = useState(false);
 
   const handleGuru = async () => {
     setError("");
@@ -452,8 +453,24 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
         ) : (
           <>
             <div className="field"><label>Username</label><input placeholder="Username" value={form.username} onChange={e => setForm(p => ({...p, username: e.target.value}))} /></div>
-            <div className="field"><label>Password</label><input type="password" placeholder="Password" value={form.password} onChange={e => setForm(p => ({...p, password: e.target.value}))} /></div>
-            <button className="btn-primary" onClick={handleGuru}> Login Guru</button>
+            <div className="field">
+              <label>Password</label>
+              <div style={{position:"relative"}}>
+                <input
+                  type={showPass ? "text" : "password"}
+                  placeholder="Password"
+                  value={form.password}
+                  onChange={e => setForm(p => ({...p, password: e.target.value}))}
+                  style={{paddingRight:"48px"}}
+                />
+                <button
+                  onClick={() => setShowPass(v => !v)}
+                  style={{position:"absolute",right:"12px",top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",cursor:"pointer",fontSize:"18px",color:"rgba(255,255,255,0.6)",padding:"4px",lineHeight:"1"}}
+                  title={showPass ? "Sembunyikan" : "Tampilkan password"}
+                >{showPass ? "🙈" : "👁️"}</button>
+              </div>
+            </div>
+            <button className="btn-primary" onClick={handleGuru}>🔐 Login Guru</button>
             {useDemo && <p style={{color:"rgba(255,255,255,0.4)", fontSize:"12px", textAlign:"center", marginTop:"12px"}}>Demo: admin / admin123</p>}
           </>
         )}
@@ -495,6 +512,7 @@ function GuruDashboard({ guru, onLogout }) {
     { id: "dashboard", icon: "📊", label: "Dashboard" },
     { id: "ujian", icon: "📋", label: "Kelola Ujian" },
     { id: "soal", icon: "✏️", label: "Buat Soal" },
+    { id: "monitor", icon: "🖥️", label: "Monitor Ujian" },
     { id: "hasil", icon: "📈", label: "Hasil Ujian" },
   ];
 
@@ -530,6 +548,7 @@ function GuruDashboard({ guru, onLogout }) {
             {page === "dashboard" && <DashboardPage ujianList={ujianList} hasilList={hasilList} />}
             {page === "ujian" && <UjianPage ujianList={ujianList} onRefresh={loadData} />}
             {page === "soal" && <SoalPage ujianList={ujianList} onRefresh={loadData} />}
+            {page === "monitor" && <MonitorPage ujianList={ujianList} />}
             {page === "hasil" && <HasilPage hasilList={hasilList} ujianList={ujianList} />}
           </>
         )}
@@ -711,7 +730,7 @@ function UjianPage({ ujianList, onRefresh }) {
 function SoalPage({ ujianList, onRefresh }) {
   const [selectedUjian, setSelectedUjian] = useState("");
   const [soalList, setSoalList] = useState([]);
-  const [form, setForm] = useState({ pertanyaan: "", opsi: ["","","",""], jawaban: 0 });
+  const [form, setForm] = useState({ pertanyaan: "", gambar: "", opsi: ["","","",""], jawaban: 0 });
   const [saving, setSaving] = useState(false);
   const [uploadMode, setUploadMode] = useState("manual"); // manual | excel | word
   const [uploadStatus, setUploadStatus] = useState("");
@@ -736,11 +755,11 @@ function SoalPage({ ujianList, onRefresh }) {
         const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
         if (idx > -1) { DEMO_UJIAN[idx].soal = [...(DEMO_UJIAN[idx].soal||[]), soalBaru]; }
       } else {
-        await supabase("soal", { method: "POST", body: JSON.stringify({ ujian_id: Number(selectedUjian), pertanyaan: form.pertanyaan, opsi: form.opsi, jawaban: form.jawaban }) });
+        await supabase("soal", { method: "POST", body: JSON.stringify({ ujian_id: Number(selectedUjian), pertanyaan: form.pertanyaan, gambar: form.gambar || null, opsi: form.opsi, jawaban: form.jawaban }) });
       }
       await onRefresh();
       setSoalList(prev => [...prev, soalBaru]);
-      setForm({ pertanyaan: "", opsi: ["","","",""], jawaban: 0 });
+      setForm({ pertanyaan: "", gambar: "", opsi: ["","","",""], jawaban: 0 });
     } catch(e) { alert("Gagal menyimpan: " + e.message); }
     setSaving(false);
   };
@@ -946,6 +965,21 @@ function SoalPage({ ujianList, onRefresh }) {
                 <label>Pertanyaan</label>
                 <textarea value={form.pertanyaan} onChange={e => setForm(p=>({...p, pertanyaan:e.target.value}))} placeholder="Tulis pertanyaan di sini..." rows={3} />
               </div>
+              <div className="form-field">
+                <label>🖼️ URL Gambar (opsional)</label>
+                <input
+                  value={form.gambar}
+                  onChange={e => setForm(p=>({...p, gambar:e.target.value}))}
+                  placeholder="Paste link gambar dari ImgBB/Google Drive (kosongkan jika tidak ada)"
+                />
+                {form.gambar && (
+                  <div style={{marginTop:"8px", borderRadius:"var(--radius2)", overflow:"hidden", border:"1px solid var(--border)", maxHeight:"200px"}}>
+                    <img src={form.gambar} alt="Preview" style={{width:"100%", objectFit:"contain", maxHeight:"200px"}}
+                      onError={e => { e.target.style.display="none"; }}
+                    />
+                  </div>
+                )}
+              </div>
               <label style={{fontSize:"13px", fontWeight:"700", color:"var(--navy3)", display:"block", marginBottom:"10px"}}>Pilihan Jawaban <span style={{color:"var(--green)", fontWeight:"600"}}>(✓ = Jawaban Benar)</span></label>
               {HURUF.map((h,i) => (
                 <div key={i} className={`option-row ${form.jawaban === i ? "correct" : ""}`}>
@@ -1100,6 +1134,148 @@ function SoalPage({ ujianList, onRefresh }) {
         </>
       )}
     </>
+  );
+}
+
+// ---- Monitor Ujian & Buka Kunci ----
+function MonitorPage({ ujianList }) {
+  const [selectedUjian, setSelectedUjian] = useState("");
+  const [pesertaAktif, setPesertaAktif] = useState([]);
+  const [unlockedSiswa, setUnlockedSiswa] = useState([]); // daftar siswa yang dibuka kuncinya
+  const [lastRefresh, setLastRefresh] = useState(new Date());
+
+  // Simpan daftar siswa yang dibuka kunci di localStorage agar persist
+  useEffect(() => {
+    const saved = localStorage.getItem("unlocked_siswa");
+    if (saved) setUnlockedSiswa(JSON.parse(saved));
+  }, []);
+
+  const saveUnlocked = (list) => {
+    setUnlockedSiswa(list);
+    localStorage.setItem("unlocked_siswa", JSON.stringify(list));
+  };
+
+  const bukаKunci = (nama, kelas) => {
+    const key = `${nama}_${kelas}`;
+    const updated = [...unlockedSiswa.filter(k => k !== key), key];
+    saveUnlocked(updated);
+    alert(`✅ Kunci ujian ${nama} (${kelas}) berhasil dibuka!\nSiswa bisa masuk ulang dengan kode ujian yang sama.`);
+  };
+
+  const resetKunci = (nama, kelas) => {
+    const key = `${nama}_${kelas}`;
+    saveUnlocked(unlockedSiswa.filter(k => k !== key));
+  };
+
+  return (
+    <>
+      <div className="page-header">
+        <h1>🖥️ Monitor Ujian</h1>
+        <p>Pantau siswa aktif & buka kunci ujian yang terkunci</p>
+      </div>
+
+      {/* Info cara kerja */}
+      <div style={{background:"var(--blue3)", borderRadius:"var(--radius)", padding:"16px 20px", marginBottom:"20px", display:"flex", gap:"12px", alignItems:"flex-start"}}>
+        <div style={{fontSize:"24px"}}>ℹ️</div>
+        <div>
+          <div style={{fontWeight:"700", color:"var(--blue2)", marginBottom:"4px"}}>Cara Buka Kunci Siswa Terkunci</div>
+          <div style={{fontSize:"13px", color:"var(--navy3)", lineHeight:"1.7"}}>
+            1. Cari nama siswa di bawah → klik <strong>🔓 Buka Kunci</strong><br/>
+            2. Minta siswa <strong>refresh halaman (F5)</strong> atau tutup browser dan buka lagi<br/>
+            3. Siswa masuk ulang dengan nama, kelas, dan kode ujian yang sama<br/>
+            4. Ujian lanjut dari awal (jawaban sebelumnya tidak tersimpan)
+          </div>
+        </div>
+      </div>
+
+      {/* Daftar siswa yang sedang terkunci (dari hasil ujian yang belum selesai) */}
+      <div className="card">
+        <div className="card-header">
+          <h2>🔒 Siswa yang Perlu Dibuka Kunci</h2>
+          <button className="btn btn-ghost" onClick={() => setLastRefresh(new Date())} style={{fontSize:"12px"}}>
+            🔄 Refresh — {lastRefresh.toLocaleTimeString('id-ID')}
+          </button>
+        </div>
+
+        <div style={{background:"var(--yellow3)", borderRadius:"var(--radius2)", padding:"12px 16px", marginBottom:"16px", fontSize:"13px", color:"#92400e"}}>
+          💡 Siswa yang ujiannya terkunci akan datang melapor ke Anda. Cari namanya di bawah lalu klik Buka Kunci.
+        </div>
+
+        {/* Form manual buka kunci */}
+        <BukaKunciManual onBukaKunci={bukаKunci} />
+      </div>
+
+      {/* Riwayat buka kunci */}
+      {unlockedSiswa.length > 0 && (
+        <div className="card">
+          <div className="card-header">
+            <h2>✅ Riwayat Buka Kunci Hari Ini</h2>
+            <button className="btn btn-red" onClick={() => saveUnlocked([])}>🗑️ Hapus Riwayat</button>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>#</th><th>Nama Siswa</th><th>Kelas</th><th>Status</th><th>Aksi</th></tr></thead>
+              <tbody>
+                {unlockedSiswa.map((key, i) => {
+                  const [nama, kelas] = key.split("_");
+                  return (
+                    <tr key={i}>
+                      <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
+                      <td><strong>{nama}</strong></td>
+                      <td>{kelas}</td>
+                      <td><span className="badge badge-green">✅ Sudah Dibuka</span></td>
+                      <td>
+                        <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => resetKunci(nama, kelas)}>Hapus</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function BukaKunciManual({ onBukaKunci }) {
+  const [nama, setNama] = useState("");
+  const [kelas, setKelas] = useState("");
+  const [success, setSuccess] = useState(false);
+
+  const handleBuka = () => {
+    if (!nama.trim()) return alert("Isi nama siswa terlebih dahulu.");
+    if (!kelas.trim()) return alert("Isi kelas siswa terlebih dahulu.");
+    onBukaKunci(nama.trim(), kelas.trim());
+    setSuccess(true);
+    setTimeout(() => setSuccess(false), 3000);
+    setNama("");
+    setKelas("");
+  };
+
+  return (
+    <div style={{background:"var(--light)", borderRadius:"var(--radius)", padding:"20px"}}>
+      <h3 style={{fontSize:"14px", fontWeight:"700", marginBottom:"16px", color:"var(--navy)"}}>🔓 Buka Kunci Ujian Siswa</h3>
+      <div style={{display:"flex", gap:"12px", flexWrap:"wrap", alignItems:"flex-end"}}>
+        <div className="form-field" style={{flex:"1", minWidth:"160px", marginBottom:0}}>
+          <label>Nama Siswa</label>
+          <input value={nama} onChange={e => setNama(e.target.value)} placeholder="Nama lengkap siswa" />
+        </div>
+        <div className="form-field" style={{flex:"1", minWidth:"120px", marginBottom:0}}>
+          <label>Kelas</label>
+          <input value={kelas} onChange={e => setKelas(e.target.value)} placeholder="Contoh: VII A" />
+        </div>
+        <button className="btn btn-green" style={{padding:"10px 20px", height:"42px"}} onClick={handleBuka}>
+          🔓 Buka Kunci
+        </button>
+      </div>
+      {success && (
+        <div style={{marginTop:"12px", padding:"10px 14px", background:"var(--green3)", borderRadius:"var(--radius2)", fontSize:"13px", color:"var(--green2)", fontWeight:"600"}}>
+          ✅ Kunci berhasil dibuka! Minta siswa refresh browser dan masuk ulang.
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1479,6 +1655,13 @@ function StudentExam({ data, onFinish }) {
           <div className="cbt-question-card">
             <div className="cbt-q-num">Soal {current + 1} dari {soal.length}</div>
             <div className="cbt-q-text">{soal[current].pertanyaan}</div>
+            {soal[current].gambar && (
+              <div style={{margin:"12px 0 20px", borderRadius:"var(--radius2)", overflow:"hidden", border:"1px solid var(--border)", textAlign:"center", background:"var(--light)"}}>
+                <img src={soal[current].gambar} alt="Gambar soal" style={{maxWidth:"100%", maxHeight:"300px", objectFit:"contain"}}
+                  onError={e => e.target.style.display="none"}
+                />
+              </div>
+            )}
             <div className="cbt-options">
               {soal[current].opsi.map((o, i) => (
                 <div key={i} className={`cbt-option ${jawaban[current] === i ? "selected" : ""}`}
