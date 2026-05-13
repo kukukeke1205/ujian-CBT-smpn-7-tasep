@@ -1572,8 +1572,11 @@ function StudentExam({ data, onFinish }) {
   const [warningMsg, setWarningMsg] = useState("");
   const [locked, setLocked] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [submitStatus, setSubmitStatus] = useState(""); // "", "queued", "saving", "done", "error"
+  const [submitStatus, setSubmitStatus] = useState("");
   const [queuePos, setQueuePos] = useState(null);
+  const [timerPaused, setTimerPaused] = useState(false); // pause saat layar mati
+  const hiddenSinceRef = React.useRef(null); // waktu layar mulai gelap
+  const VIOLATION_THRESHOLD_MS = 5000; // 5 detik — lebih dari ini = pelanggaran
   const MAX_VIOLATIONS = 3;
 
   // ── Fullscreen ──────────────────────────────────────────────
@@ -1611,21 +1614,39 @@ function StudentExam({ data, onFinish }) {
     };
   }, [submitting]);
 
-  // ── Deteksi pindah tab ──────────────────────────────────────
+  // ── Deteksi pindah tab vs layar mati ───────────────────────
+  // Logika: catat waktu layar gelap. Saat kembali, cek durasinya.
+  // Jika < 5 detik → kemungkinan layar mati (tidak dihitung pelanggaran, timer di-pause)
+  // Jika >= 5 detik → kemungkinan berpindah tab (dihitung pelanggaran)
   useEffect(() => {
     const onVisibility = () => {
       if (document.hidden && !submitting) {
-        setTabViolation(v => {
-          const nv = v + 1;
-          if (nv >= MAX_VIOLATIONS) {
-            setLocked(true);
-            setWarningMsg(`🔒 Ujian dikunci! Anda berpindah tab ${nv}x. Hubungi pengawas.`);
-          } else {
-            setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Terdeteksi meninggalkan halaman ujian!`);
+        // Layar mulai gelap / tab disembunyikan
+        hiddenSinceRef.current = Date.now();
+        setTimerPaused(true); // pause timer dulu
+      } else if (!document.hidden && !submitting) {
+        // Layar menyala kembali / kembali ke tab
+        setTimerPaused(false); // lanjutkan timer
+        if (hiddenSinceRef.current) {
+          const durasi = Date.now() - hiddenSinceRef.current;
+          hiddenSinceRef.current = null;
+          if (durasi >= VIOLATION_THRESHOLD_MS) {
+            // Berpindah tab / aplikasi lain (lebih dari 5 detik)
+            setTabViolation(v => {
+              const nv = v + 1;
+              if (nv >= MAX_VIOLATIONS) {
+                setLocked(true);
+                setWarningMsg(`🔒 Ujian dikunci! Anda terdeteksi meninggalkan ujian ${nv}x. Hubungi pengawas.`);
+              } else {
+                setWarningMsg(`⚠️ PERINGATAN ${nv}/${MAX_VIOLATIONS}: Anda terdeteksi meninggalkan halaman ujian selama ${Math.round(durasi/1000)} detik!`);
+              }
+              setShowWarning(true);
+              return nv;
+            });
           }
-          setShowWarning(true);
-          return nv;
-        });
+          // Jika < 5 detik: layar mati sebentar, tidak dihitung pelanggaran
+          // Timer sudah dilanjutkan otomatis di atas
+        }
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
@@ -1648,9 +1669,9 @@ function StudentExam({ data, onFinish }) {
     };
   }, []);
 
-  // ── Timer ───────────────────────────────────────────────────
+  // ── Timer (pause saat layar mati) ──────────────────────────
   useEffect(() => {
-    if (locked || submitting) return;
+    if (locked || submitting || timerPaused) return;
     const t = setInterval(() => {
       setTimeLeft(prev => {
         if (prev <= 1) { clearInterval(t); handleSubmit(true); return 0; }
@@ -1658,7 +1679,7 @@ function StudentExam({ data, onFinish }) {
       });
     }, 1000);
     return () => clearInterval(t);
-  }, [locked, submitting]);
+  }, [locked, submitting, timerPaused]);
 
   // ── Submit dengan Antrian ───────────────────────────────────
   const handleSubmit = useCallback(async (auto = false) => {
@@ -1824,7 +1845,10 @@ function StudentExam({ data, onFinish }) {
           <div style={{background:isFullscreen?"rgba(34,197,94,0.2)":"rgba(239,68,68,0.2)",borderRadius:"8px",padding:"4px 10px",fontSize:"12px",color:isFullscreen?"#86efac":"#fca5a5",cursor:"pointer"}} onClick={enterFullscreen}>
             {isFullscreen ? "🔒 Fullscreen" : "⚠️ Klik Fullscreen"}
           </div>
-          <div className={`cbt-timer ${isDanger ? "danger" : ""}`}>⏱ {formatTime(timeLeft)}</div>
+          <div className={`cbt-timer ${isDanger && !timerPaused ? "danger" : ""}`}
+            style={timerPaused ? {background:"rgba(251,191,36,0.3)",color:"#fcd34d"} : {}}>
+            {timerPaused ? "⏸ Timer Dijeda" : `⏱ ${formatTime(timeLeft)}`}
+          </div>
         </div>
       </div>
 
