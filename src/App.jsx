@@ -101,7 +101,7 @@ function shuffleSoalDanOpsi(soalAsli) {
 // ============================================================
 const MAPEL = [
   "Matematika","Bahasa Indonesia","Bahasa Inggris","IPA","IPS",
-  "PKN","Agama","Informatika","PJOK","Prakarya",
+  "PKN","Agama"," Informatika","PJOK","Prakarya",
 ];
 
 const GURU_ACCOUNTS = [
@@ -495,14 +495,26 @@ function GuruDashboard({ guru, onLogout }) {
         setUjianList([...DEMO_UJIAN]);
         setHasilList([...DEMO_HASIL]);
       } else {
-        const [u, h] = await Promise.all([
+        // Load ujian, soal, dan hasil sekaligus
+        const [ujianRaw, soalRaw, hasilRaw] = await Promise.all([
           supabase("ujian?order=id.desc"),
+          supabase("soal?order=ujian_id.asc,id.asc"),
           supabase("hasil?order=id.desc"),
         ]);
-        setUjianList(u);
-        setHasilList(h);
+        // Gabungkan soal ke masing-masing ujian
+        const ujianDenganSoal = ujianRaw.map(u => ({
+          ...u,
+          soal: soalRaw.filter(s => s.ujian_id === u.id).map(s => ({
+            ...s,
+            opsi: Array.isArray(s.opsi) ? s.opsi : (typeof s.opsi === 'string' ? JSON.parse(s.opsi) : []),
+          }))
+        }));
+        setUjianList(ujianDenganSoal);
+        setHasilList(hasilRaw);
       }
-    } catch(e) { console.error(e); }
+    } catch(e) {
+      console.error("Gagal load data:", e);
+    }
     setLoading(false);
   }, []);
 
@@ -1317,102 +1329,167 @@ function SoalPage({ ujianList, onRefresh }) {
 
 // ---- Monitor Ujian & Buka Kunci ----
 function MonitorPage({ ujianList }) {
-  const [selectedUjian, setSelectedUjian] = useState("");
-  const [pesertaAktif, setPesertaAktif] = useState([]);
-  const [unlockedSiswa, setUnlockedSiswa] = useState([]); // daftar siswa yang dibuka kuncinya
+  const [hasilLive, setHasilLive] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(new Date());
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [unlockedSiswa, setUnlockedSiswa] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("unlocked_siswa") || "[]"); } catch { return []; }
+  });
 
-  // Simpan daftar siswa yang dibuka kunci di localStorage agar persist
-  useEffect(() => {
-    const saved = localStorage.getItem("unlocked_siswa");
-    if (saved) setUnlockedSiswa(JSON.parse(saved));
+  const loadHasil = useCallback(async () => {
+    setLoading(true);
+    try {
+      if (!useDemo) {
+        const data = await supabase("hasil?order=id.desc");
+        setHasilLive(data);
+      } else {
+        setHasilLive([...DEMO_HASIL]);
+      }
+      setLastRefresh(new Date());
+    } catch(e) { console.error(e); }
+    setLoading(false);
   }, []);
+
+  useEffect(() => { loadHasil(); }, [loadHasil]);
+
+  // Auto-refresh setiap 10 detik
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const t = setInterval(loadHasil, 10000);
+    return () => clearInterval(t);
+  }, [autoRefresh, loadHasil]);
 
   const saveUnlocked = (list) => {
     setUnlockedSiswa(list);
     localStorage.setItem("unlocked_siswa", JSON.stringify(list));
   };
 
-  const bukаKunci = (nama, kelas) => {
+  const bukaKunci = (nama, kelas) => {
     const key = `${nama}_${kelas}`;
-    const updated = [...unlockedSiswa.filter(k => k !== key), key];
-    saveUnlocked(updated);
-    alert(`✅ Kunci ujian ${nama} (${kelas}) berhasil dibuka!\nSiswa bisa masuk ulang dengan kode ujian yang sama.`);
+    saveUnlocked([...unlockedSiswa.filter(k => k !== key), key]);
+    alert(`✅ Kunci ujian ${nama} (${kelas}) berhasil dibuka!\nMinta siswa refresh browser dan masuk ulang.`);
   };
 
-  const resetKunci = (nama, kelas) => {
-    const key = `${nama}_${kelas}`;
-    saveUnlocked(unlockedSiswa.filter(k => k !== key));
-  };
+  // Statistik
+  const totalSiswa = hasilLive.length;
+  const sudahSelesai = hasilLive.length;
+  const curiga = hasilLive.filter(h => h.mencurigakan).length;
+  const rataRata = totalSiswa > 0 ? Math.round(hasilLive.reduce((a,h) => a + (h.nilai||0), 0) / totalSiswa) : 0;
 
   return (
     <>
       <div className="page-header">
-        <h1>🖥️ Monitor Ujian</h1>
-        <p>Pantau siswa aktif & buka kunci ujian yang terkunci</p>
+        <h1>🖥️ Monitor Ujian Live</h1>
+        <p>Pantau aktivitas siswa secara real-time</p>
       </div>
 
-      {/* Info cara kerja */}
-      <div style={{background:"var(--blue3)", borderRadius:"var(--radius)", padding:"16px 20px", marginBottom:"20px", display:"flex", gap:"12px", alignItems:"flex-start"}}>
-        <div style={{fontSize:"24px"}}>ℹ️</div>
-        <div>
-          <div style={{fontWeight:"700", color:"var(--blue2)", marginBottom:"4px"}}>Cara Buka Kunci Siswa Terkunci</div>
-          <div style={{fontSize:"13px", color:"var(--navy3)", lineHeight:"1.7"}}>
-            1. Cari nama siswa di bawah → klik <strong>🔓 Buka Kunci</strong><br/>
-            2. Minta siswa <strong>refresh halaman (F5)</strong> atau tutup browser dan buka lagi<br/>
-            3. Siswa masuk ulang dengan nama, kelas, dan kode ujian yang sama<br/>
-            4. Ujian lanjut dari awal (jawaban sebelumnya tidak tersimpan)
+      {/* Status bar */}
+      <div style={{display:"flex", gap:"12px", marginBottom:"20px", flexWrap:"wrap"}}>
+        {[
+          { icon:"✅", label:"Sudah Submit", val:sudahSelesai, bg:"var(--green3)", color:"var(--green2)" },
+          { icon:"🚨", label:"Mencurigakan", val:curiga, bg:"var(--red3)", color:"var(--red2)" },
+          { icon:"⭐", label:"Rata-rata Nilai", val:rataRata, bg:"var(--blue3)", color:"var(--blue2)" },
+        ].map((s,i) => (
+          <div key={i} style={{background:s.bg, borderRadius:"var(--radius)", padding:"16px 20px", flex:"1", minWidth:"140px"}}>
+            <div style={{fontSize:"22px", fontWeight:"800", color:s.color, fontFamily:"var(--mono)"}}>{s.icon} {s.val}</div>
+            <div style={{fontSize:"12px", color:s.color, marginTop:"4px"}}>{s.label}</div>
+          </div>
+        ))}
+        <div style={{background:"white", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:"16px 20px", flex:"1", minWidth:"160px", display:"flex", flexDirection:"column", gap:"8px"}}>
+          <div style={{display:"flex", alignItems:"center", gap:"8px"}}>
+            <div style={{width:"8px", height:"8px", borderRadius:"50%", background: autoRefresh ? "var(--green)" : "var(--gray)", animation: autoRefresh ? "pulse 1.5s infinite" : "none"}}></div>
+            <span style={{fontSize:"13px", fontWeight:"600"}}>{autoRefresh ? "Auto Refresh ON" : "Auto Refresh OFF"}</span>
+          </div>
+          <div style={{fontSize:"11px", color:"var(--gray)"}}>Update: {lastRefresh.toLocaleTimeString('id-ID')}</div>
+          <div style={{display:"flex", gap:"6px"}}>
+            <button className="btn btn-blue" style={{fontSize:"11px", padding:"4px 10px"}} onClick={loadHasil} disabled={loading}>
+              {loading ? "..." : "🔄 Refresh"}
+            </button>
+            <button className={`btn ${autoRefresh ? "btn-red" : "btn-green"}`} style={{fontSize:"11px", padding:"4px 10px"}} onClick={() => setAutoRefresh(v => !v)}>
+              {autoRefresh ? "⏸ Pause" : "▶ Auto"}
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Daftar siswa yang sedang terkunci (dari hasil ujian yang belum selesai) */}
-      <div className="card">
-        <div className="card-header">
-          <h2>🔒 Siswa yang Perlu Dibuka Kunci</h2>
-          <button className="btn btn-ghost" onClick={() => setLastRefresh(new Date())} style={{fontSize:"12px"}}>
-            🔄 Refresh — {lastRefresh.toLocaleTimeString('id-ID')}
-          </button>
-        </div>
-
-        <div style={{background:"var(--yellow3)", borderRadius:"var(--radius2)", padding:"12px 16px", marginBottom:"16px", fontSize:"13px", color:"#92400e"}}>
-          💡 Siswa yang ujiannya terkunci akan datang melapor ke Anda. Cari namanya di bawah lalu klik Buka Kunci.
-        </div>
-
-        {/* Form manual buka kunci */}
-        <BukaKunciManual onBukaKunci={bukаKunci} />
-      </div>
-
-      {/* Riwayat buka kunci */}
-      {unlockedSiswa.length > 0 && (
-        <div className="card">
-          <div className="card-header">
-            <h2>✅ Riwayat Buka Kunci Hari Ini</h2>
-            <button className="btn btn-red" onClick={() => saveUnlocked([])}>🗑️ Hapus Riwayat</button>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>#</th><th>Nama Siswa</th><th>Kelas</th><th>Status</th><th>Aksi</th></tr></thead>
-              <tbody>
-                {unlockedSiswa.map((key, i) => {
-                  const [nama, kelas] = key.split("_");
-                  return (
-                    <tr key={i}>
-                      <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
-                      <td><strong>{nama}</strong></td>
-                      <td>{kelas}</td>
-                      <td><span className="badge badge-green">✅ Sudah Dibuka</span></td>
-                      <td>
-                        <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => resetKunci(nama, kelas)}>Hapus</button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      {/* Alert mencurigakan */}
+      {curiga > 0 && (
+        <div style={{background:"var(--red3)", border:"1px solid var(--red)", borderRadius:"var(--radius)", padding:"14px 18px", marginBottom:"16px", display:"flex", alignItems:"center", gap:"12px"}}>
+          <div style={{fontSize:"20px"}}>🚨</div>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:"700", color:"var(--red2)"}}>Terdeteksi {curiga} siswa mencurigakan!</div>
+            <div style={{fontSize:"12px", color:"var(--red2)", opacity:0.8}}>Lihat detail di tabel bawah — kolom Pelanggaran.</div>
           </div>
         </div>
       )}
+
+      {/* Tabel hasil live */}
+      <div className="card">
+        <div className="card-header">
+          <h2>📊 Rekap Siswa ({totalSiswa})</h2>
+        </div>
+        {hasilLive.length === 0 ? (
+          <div className="empty-state">
+            <div className="icon">⏳</div>
+            <p>Belum ada siswa yang submit. Halaman ini auto-refresh setiap 10 detik.</p>
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>#</th><th>Nama</th><th>Kelas</th><th>Mapel</th><th>Nilai</th><th>Status</th><th>Pelanggaran</th></tr>
+              </thead>
+              <tbody>
+                {hasilLive.map((h, i) => (
+                  <tr key={i} style={{background: h.mencurigakan ? "#fff5f5" : ""}}>
+                    <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
+                    <td>
+                      <strong>{h.nama_siswa}</strong>
+                      {h.mencurigakan && <span style={{marginLeft:"6px", fontSize:"10px", color:"var(--red2)", fontWeight:"700", background:"var(--red3)", padding:"1px 6px", borderRadius:"99px"}}>⚠️ Curiga</span>}
+                    </td>
+                    <td>{h.kelas}</td>
+                    <td>{h.mapel}</td>
+                    <td><strong style={{fontFamily:"var(--mono)", color: h.nilai>=75?"var(--green2)":"var(--red2)"}}>{h.nilai}</strong></td>
+                    <td><span className={`badge ${h.nilai>=75?"badge-green":"badge-red"}`}>{h.nilai>=75?"Lulus":"Remedi"}</span></td>
+                    <td>
+                      {(h.pelanggaran||0) === 0
+                        ? <span style={{color:"var(--green2)", fontSize:"12px"}}>✅ Bersih</span>
+                        : <span style={{color:"var(--red2)", fontSize:"12px", fontWeight:"700"}}>⚠️ {h.pelanggaran}x</span>
+                      }
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Buka Kunci */}
+      <div className="card">
+        <div className="card-header"><h2>🔓 Buka Kunci Siswa</h2></div>
+        <div style={{background:"var(--blue3)", borderRadius:"var(--radius2)", padding:"12px 16px", marginBottom:"16px", fontSize:"13px", color:"var(--navy3)"}}>
+          ℹ️ Jika ada siswa yang ujiannya terkunci (3x pelanggaran), isi nama dan kelas di bawah lalu klik Buka Kunci. Minta siswa refresh browser dan masuk ulang.
+        </div>
+        <BukaKunciManual onBukaKunci={bukaKunci} />
+        {unlockedSiswa.length > 0 && (
+          <div style={{marginTop:"16px"}}>
+            <div style={{fontSize:"13px", fontWeight:"700", marginBottom:"8px"}}>Riwayat Buka Kunci:</div>
+            <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+              {unlockedSiswa.map((key, i) => {
+                const [nama, kelas] = key.split("_");
+                return (
+                  <div key={i} style={{background:"var(--green3)", padding:"4px 12px", borderRadius:"99px", fontSize:"12px", color:"var(--green2)", fontWeight:"600"}}>
+                    ✅ {nama} ({kelas})
+                  </div>
+                );
+              })}
+            </div>
+            <button className="btn btn-ghost" style={{fontSize:"12px", marginTop:"8px"}} onClick={() => saveUnlocked([])}>Hapus Riwayat</button>
+          </div>
+        )}
+      </div>
     </>
   );
 }
@@ -1428,13 +1505,11 @@ function BukaKunciManual({ onBukaKunci }) {
     onBukaKunci(nama.trim(), kelas.trim());
     setSuccess(true);
     setTimeout(() => setSuccess(false), 3000);
-    setNama("");
-    setKelas("");
+    setNama(""); setKelas("");
   };
 
   return (
     <div style={{background:"var(--light)", borderRadius:"var(--radius)", padding:"20px"}}>
-      <h3 style={{fontSize:"14px", fontWeight:"700", marginBottom:"16px", color:"var(--navy)"}}>🔓 Buka Kunci Ujian Siswa</h3>
       <div style={{display:"flex", gap:"12px", flexWrap:"wrap", alignItems:"flex-end"}}>
         <div className="form-field" style={{flex:"1", minWidth:"160px", marginBottom:0}}>
           <label>Nama Siswa</label>
@@ -1444,9 +1519,7 @@ function BukaKunciManual({ onBukaKunci }) {
           <label>Kelas</label>
           <input value={kelas} onChange={e => setKelas(e.target.value)} placeholder="Contoh: VII A" />
         </div>
-        <button className="btn btn-green" style={{padding:"10px 20px", height:"42px"}} onClick={handleBuka}>
-          🔓 Buka Kunci
-        </button>
+        <button className="btn btn-green" style={{padding:"10px 20px", height:"42px"}} onClick={handleBuka}>🔓 Buka Kunci</button>
       </div>
       {success && (
         <div style={{marginTop:"12px", padding:"10px 14px", background:"var(--green3)", borderRadius:"var(--radius2)", fontSize:"13px", color:"var(--green2)", fontWeight:"600"}}>
