@@ -1,6 +1,157 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 
 // ============================================================
+// KATEX LOADER & RENDERER
+// Load KaTeX dari CDN untuk render rumus matematika
+// Format yang dipakai:
+//   $...$        → inline math (di dalam paragraf)
+//   $$...$$      → display math (rumus besar, terpusat)
+// Contoh: "Akar dari $\sqrt{25}$ adalah 5"
+// ============================================================
+const KATEX_VERSION = "0.16.11";
+const KATEX_CSS_URL = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.min.css`;
+const KATEX_JS_URL = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.min.js`;
+
+let katexReady = false;
+let katexPromise = null;
+
+function loadKatex() {
+  if (katexReady) return Promise.resolve();
+  if (katexPromise) return katexPromise;
+
+  katexPromise = new Promise((resolve, reject) => {
+    // Load CSS
+    if (!document.querySelector(`link[href="${KATEX_CSS_URL}"]`)) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = KATEX_CSS_URL;
+      document.head.appendChild(link);
+    }
+
+    // Load JS
+    if (window.katex) {
+      katexReady = true;
+      return resolve();
+    }
+    const script = document.createElement("script");
+    script.src = KATEX_JS_URL;
+    script.defer = true;
+    script.onload = () => { katexReady = true; resolve(); };
+    script.onerror = () => reject(new Error("Gagal memuat KaTeX"));
+    document.head.appendChild(script);
+  });
+  return katexPromise;
+}
+
+// React component untuk render teks dengan rumus matematika
+// Cara pakai: <MathText text="Hasil $\sqrt{25}$ adalah 5" />
+function MathText({ text, displayMode = false }) {
+  const ref = useRef(null);
+  const [, setReady] = useState(katexReady);
+
+  useEffect(() => {
+    loadKatex().then(() => setReady(true)).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    if (!ref.current || !window.katex || !text) return;
+
+    // Split text by $$...$$ (display) and $...$ (inline)
+    // Strategy: tokenize text jadi alternating [text, math, text, math, ...]
+    const container = ref.current;
+    container.innerHTML = ""; // clear
+
+    // Regex match $$...$$ first (display), then $...$ (inline)
+    const regex = /(\$\$[^$]+\$\$|\$[^$\n]+\$)/g;
+    const parts = text.split(regex);
+
+    parts.forEach(part => {
+      if (!part) return;
+      const isDisplay = part.startsWith("$$") && part.endsWith("$$");
+      const isInline = !isDisplay && part.startsWith("$") && part.endsWith("$");
+
+      if (isDisplay || isInline) {
+        const latex = part.slice(isDisplay ? 2 : 1, isDisplay ? -2 : -1);
+        const span = document.createElement("span");
+        try {
+          window.katex.render(latex, span, {
+            displayMode: isDisplay,
+            throwOnError: false,
+            errorColor: "#dc2626",
+          });
+        } catch (e) {
+          span.textContent = part;
+          span.style.color = "#dc2626";
+          span.title = "Error LaTeX: " + e.message;
+        }
+        container.appendChild(span);
+      } else {
+        // Plain text - support \n untuk multi-line
+        part.split("\n").forEach((line, i, arr) => {
+          container.appendChild(document.createTextNode(line));
+          if (i < arr.length - 1) container.appendChild(document.createElement("br"));
+        });
+      }
+    });
+  }, [text]);
+
+  return <span ref={ref} style={{ display: displayMode ? "block" : "inline" }} />;
+}
+
+// Komponen helper untuk menampilkan cheat sheet LaTeX
+function LatexHelp() {
+  const [show, setShow] = useState(false);
+  const examples = [
+    { label: "Pangkat", code: "x^2", display: "x^2" },
+    { label: "Pangkat (lebih dari 1 angka)", code: "x^{12}", display: "x^{12}" },
+    { label: "Akar kuadrat", code: "\\sqrt{25}", display: "\\sqrt{25}" },
+    { label: "Akar pangkat n", code: "\\sqrt[3]{8}", display: "\\sqrt[3]{8}" },
+    { label: "Pecahan", code: "\\frac{a}{b}", display: "\\frac{a}{b}" },
+    { label: "Pecahan campuran", code: "2\\frac{1}{3}", display: "2\\frac{1}{3}" },
+    { label: "Kali", code: "3 \\times 4", display: "3 \\times 4" },
+    { label: "Bagi", code: "10 \\div 2", display: "10 \\div 2" },
+    { label: "Tidak sama", code: "a \\neq b", display: "a \\neq b" },
+    { label: "Kurang dari/sama", code: "a \\leq b", display: "a \\leq b" },
+    { label: "Lebih dari/sama", code: "a \\geq b", display: "a \\geq b" },
+    { label: "Plus minus", code: "\\pm 5", display: "\\pm 5" },
+    { label: "Pi", code: "\\pi r^2", display: "\\pi r^2" },
+    { label: "Tak hingga", code: "\\infty", display: "\\infty" },
+    { label: "Derajat", code: "90^\\circ", display: "90^\\circ" },
+    { label: "Sigma (jumlah)", code: "\\sum_{i=1}^{n} i", display: "\\sum_{i=1}^{n} i" },
+  ];
+  return (
+    <div style={{marginTop:"8px"}}>
+      <button
+        type="button"
+        onClick={() => setShow(s => !s)}
+        style={{background:"transparent", border:"1px dashed var(--border)", borderRadius:"var(--radius2)", padding:"6px 12px", fontSize:"12px", color:"var(--blue)", cursor:"pointer", fontWeight:"600"}}
+      >
+        {show ? "▲ Tutup Cheat Sheet LaTeX" : "📐 Lihat Cheat Sheet LaTeX (untuk rumus matematika)"}
+      </button>
+      {show && (
+        <div style={{marginTop:"8px", padding:"12px", background:"#fef3c7", border:"1px solid #fcd34d", borderRadius:"var(--radius2)", fontSize:"12px"}}>
+          <p style={{marginBottom:"8px", color:"#78350f"}}>
+            <strong>Cara pakai:</strong> Tulis rumus di antara tanda <code style={{background:"#fff",padding:"2px 4px",borderRadius:"3px"}}>$...$</code>. Contoh: <code style={{background:"#fff",padding:"2px 4px",borderRadius:"3px"}}>Hasil dari $\sqrt{"{25}"}$ adalah 5</code>
+          </p>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:"8px"}}>
+            {examples.map((ex, i) => (
+              <div key={i} style={{padding:"8px", background:"white", border:"1px solid #fbbf24", borderRadius:"6px"}}>
+                <div style={{fontSize:"10px", color:"#92400e", fontWeight:"700", marginBottom:"4px"}}>{ex.label}</div>
+                <div style={{fontFamily:"var(--mono)", fontSize:"11px", color:"#78350f", marginBottom:"4px", wordBreak:"break-all"}}>${ex.code}$</div>
+                <div style={{fontSize:"14px"}}><MathText text={`$${ex.display}$`} /></div>
+              </div>
+            ))}
+          </div>
+          <p style={{marginTop:"10px", fontSize:"11px", color:"#78350f"}}>
+            <strong>💡 Tips:</strong> Untuk rumus yang lebih besar dan terpusat, pakai <code style={{background:"#fff",padding:"2px 4px",borderRadius:"3px"}}>$$...$$</code> (dua tanda dolar).
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // SUPABASE CONFIG — Ganti dengan kredensial Supabase Anda
 // ============================================================
 const SUPABASE_URL = "https://ehnazhgudaspeuolnwkj.supabase.co";
@@ -481,7 +632,7 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
   const handleSiswa = async () => {
     setError("");
     if (!form.nama.trim()) return setError("Nama tidak boleh kosong.");
-    if (!form.kelas.trim()) return setError("Kelas tidak boleh kosong.");
+    if (!form.kelas.trim()) return setError("Silakan pilih kelas Anda.");
     if (!form.examKey.trim()) return setError("Kode ujian tidak boleh kosong.");
     setLoading(true);
     try {
@@ -545,7 +696,27 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
         {tab === "siswa" ? (
           <>
             <div className="field"><label>Nama Lengkap</label><input placeholder="Nama lengkap Anda" value={form.nama} onChange={e => setForm(p => ({...p, nama: e.target.value}))} /></div>
-            <div className="field"><label>Kelas</label><input placeholder="Contoh: X IPA 1" value={form.kelas} onChange={e => setForm(p => ({...p, kelas: e.target.value}))} /></div>
+            <div className="field">
+              <label>Kelas</label>
+              <select value={form.kelas} onChange={e => setForm(p => ({...p, kelas: e.target.value}))}>
+                <option value="">-- Pilih Kelas --</option>
+                <optgroup label="Kelas VII">
+                  <option value="VII-1">VII-1</option>
+                  <option value="VII-2">VII-2</option>
+                  <option value="VII-3">VII-3</option>
+                </optgroup>
+                <optgroup label="Kelas VIII">
+                  <option value="VIII-1">VIII-1</option>
+                  <option value="VIII-2">VIII-2</option>
+                  <option value="VIII-3">VIII-3</option>
+                </optgroup>
+                <optgroup label="Kelas IX">
+                  <option value="IX-1">IX-1</option>
+                  <option value="IX-2">IX-2</option>
+                  <option value="IX-3">IX-3</option>
+                </optgroup>
+              </select>
+            </div>
             <div className="field"><label>Kode Ujian</label><input placeholder="Masukkan kode dari guru" value={form.examKey} onChange={e => setForm(p => ({...p, examKey: e.target.value.toUpperCase()}))} style={{letterSpacing:"3px", fontFamily:"var(--mono)", fontWeight:"700"}} /></div>
             <button className="btn-primary" onClick={handleSiswa} disabled={loading}>{loading ? "Memuat..." : "🚀 Mulai Ujian"}</button>
             {useDemo && <p style={{color:"rgba(255,255,255,0.4)", fontSize:"12px", textAlign:"center", marginTop:"12px"}}>Demo: gunakan kode <strong style={{color:"#93c5fd"}}>MTK001</strong></p>}
@@ -892,7 +1063,27 @@ function UjianPage({ ujianList, onRefresh }) {
                   {MAPEL.map(m => <option key={m}>{m}</option>)}
                 </select>
               </div>
-              <div className="form-field"><label>Kelas</label><input value={form.kelas} onChange={e => setForm(p=>({...p, kelas:e.target.value}))} placeholder="VII A" /></div>
+              <div className="form-field">
+                <label>Kelas</label>
+                <select value={form.kelas} onChange={e => setForm(p=>({...p, kelas: e.target.value}))}>
+                  <option value="">-- Pilih Kelas --</option>
+                  <optgroup label="Kelas VII">
+                    <option value="VII-1">VII-1</option>
+                    <option value="VII-2">VII-2</option>
+                    <option value="VII-3">VII-3</option>
+                  </optgroup>
+                  <optgroup label="Kelas VIII">
+                    <option value="VIII-1">VIII-1</option>
+                    <option value="VIII-2">VIII-2</option>
+                    <option value="VIII-3">VIII-3</option>
+                  </optgroup>
+                  <optgroup label="Kelas IX">
+                    <option value="IX-1">IX-1</option>
+                    <option value="IX-2">IX-2</option>
+                    <option value="IX-3">IX-3</option>
+                  </optgroup>
+                </select>
+              </div>
               <div className="form-field"><label>Durasi (menit)</label><input type="number" value={form.durasi} onChange={e => setForm(p=>({...p, durasi:e.target.value}))} /></div>
               <div className="form-field"><label>⏰ Jam Buka (opsional)</label><input type="time" value={form.jam_buka} onChange={e => setForm(p=>({...p, jam_buka:e.target.value}))} /></div>
               <div className="form-field"><label>⏰ Jam Tutup (opsional)</label><input type="time" value={form.jam_tutup} onChange={e => setForm(p=>({...p, jam_tutup:e.target.value}))} /></div>
@@ -1306,7 +1497,15 @@ function SoalPage({ ujianList, onRefresh }) {
               )}
               <div className="form-field">
                 <label>Pertanyaan</label>
-                <textarea value={form.pertanyaan} onChange={e => setForm(p=>({...p, pertanyaan:e.target.value}))} placeholder="Tulis pertanyaan di sini..." rows={3} />
+                <textarea value={form.pertanyaan} onChange={e => setForm(p=>({...p, pertanyaan:e.target.value}))} placeholder="Tulis pertanyaan di sini. Pakai $...$ untuk rumus, mis: Hasil $\sqrt{25}$ adalah?" rows={3} />
+                {/* Live preview rumus */}
+                {form.pertanyaan && form.pertanyaan.includes("$") && (
+                  <div style={{marginTop:"8px", padding:"10px 12px", background:"#f0f9ff", border:"1px solid #bae6fd", borderRadius:"var(--radius2)", fontSize:"13px"}}>
+                    <div style={{fontSize:"11px", color:"#0369a1", fontWeight:"700", marginBottom:"4px"}}>👁️ PREVIEW</div>
+                    <div><MathText text={form.pertanyaan} /></div>
+                  </div>
+                )}
+                <LatexHelp />
               </div>
               <div className="form-field">
                 <label>🖼️ URL Gambar (opsional)</label>
@@ -1327,10 +1526,21 @@ function SoalPage({ ujianList, onRefresh }) {
               {HURUF.map((h,i) => (
                 <div key={i} className={`option-row ${form.jawaban === i ? "correct" : ""}`}>
                   <div className="option-label">{h}</div>
-                  <input value={form.opsi[i]} onChange={e => { const o = [...form.opsi]; o[i] = e.target.value; setForm(p=>({...p, opsi:o})); }} placeholder={`Opsi ${h}`} />
+                  <input value={form.opsi[i]} onChange={e => { const o = [...form.opsi]; o[i] = e.target.value; setForm(p=>({...p, opsi:o})); }} placeholder={`Opsi ${h} (boleh pakai $...$ untuk rumus)`} />
                   <button className={`btn ${form.jawaban === i ? "btn-green" : "btn-ghost"}`} onClick={() => setForm(p=>({...p, jawaban:i}))}>✓</button>
                 </div>
               ))}
+              {/* Preview opsi yang ada rumusnya */}
+              {form.opsi.some(o => o && o.includes("$")) && (
+                <div style={{marginTop:"8px", padding:"10px 12px", background:"#f0f9ff", border:"1px solid #bae6fd", borderRadius:"var(--radius2)", fontSize:"13px"}}>
+                  <div style={{fontSize:"11px", color:"#0369a1", fontWeight:"700", marginBottom:"6px"}}>👁️ PREVIEW OPSI</div>
+                  {form.opsi.map((o, i) => o && (
+                    <div key={i} style={{marginBottom:"4px"}}>
+                      <strong>{HURUF[i]}.</strong> <MathText text={o} />
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{marginTop:"16px", display:"flex", gap:"8px"}}>
                 <button className="btn btn-blue" onClick={handleSave} disabled={saving}>
                   {saving ? "Menyimpan..." : editSoal ? "💾 Simpan Perubahan" : "💾 Simpan Soal"}
@@ -1475,11 +1685,11 @@ function SoalPage({ ujianList, onRefresh }) {
                           <img src={s.gambar} alt="gambar soal" style={{maxHeight:"120px", objectFit:"contain", width:"100%"}} onError={e => e.target.style.display="none"} />
                         </div>
                       )}
-                      <div style={{fontSize:"14px", fontWeight:"500", marginBottom:"10px"}}>{s.pertanyaan}</div>
+                      <div style={{fontSize:"14px", fontWeight:"500", marginBottom:"10px"}}><MathText text={s.pertanyaan} /></div>
                       <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
                         {s.opsi.map((o,i) => (
                           <span key={i} style={{fontSize:"12px", padding:"3px 10px", borderRadius:"99px", background: i === s.jawaban ? "var(--green3)" : "var(--light)", color: i === s.jawaban ? "var(--green2)" : "var(--gray)", fontWeight: i === s.jawaban ? "700" : "500"}}>
-                            {HURUF[i]}. {o}
+                            {HURUF[i]}. <MathText text={o} />
                           </span>
                         ))}
                       </div>
@@ -2498,7 +2708,7 @@ function StudentExam({ data, onFinish }) {
         <div className="cbt-main">
           <div className="cbt-question-card">
             <div className="cbt-q-num">Soal {current + 1} dari {soal.length}</div>
-            <div className="cbt-q-text">{soal[current].pertanyaan}</div>
+            <div className="cbt-q-text"><MathText text={soal[current].pertanyaan} /></div>
             {soal[current].gambar && (
               <div style={{margin:"12px 0 20px", borderRadius:"var(--radius2)", overflow:"hidden", border:"1px solid var(--border)", textAlign:"center", background:"var(--light)"}}>
                 <img src={soal[current].gambar} alt="Gambar soal" style={{maxWidth:"100%", maxHeight:"300px", objectFit:"contain"}}
@@ -2511,7 +2721,7 @@ function StudentExam({ data, onFinish }) {
                 <div key={i} className={`cbt-option ${jawaban[current] === i ? "selected" : ""}`}
                   onClick={() => { if(locked) return; const j = [...jawaban]; j[current] = i; setJawaban(j); }}>
                   <div className="cbt-option-label">{HURUF[i]}</div>
-                  <div className="cbt-option-text">{o}</div>
+                  <div className="cbt-option-text"><MathText text={o} /></div>
                 </div>
               ))}
             </div>
