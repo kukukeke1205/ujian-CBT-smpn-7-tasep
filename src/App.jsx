@@ -400,10 +400,37 @@ class ErrorBoundary extends React.Component {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState("login"); // login | guru-dashboard | student-exam | result
-  const [guru, setGuru] = useState(null);
+  // Pulihkan login guru dari localStorage (jika ada)
+  // Login guru ter-persist supaya refresh tidak logout.
+  // Catatan: student-exam SENGAJA tidak di-persist demi keamanan ujian.
+  const [screen, setScreen] = useState(() => {
+    try {
+      const saved = localStorage.getItem("guru_login");
+      return saved ? "guru-dashboard" : "login";
+    } catch { return "login"; }
+  });
+  const [guru, setGuru] = useState(() => {
+    try {
+      const saved = localStorage.getItem("guru_login");
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
   const [studentData, setStudentData] = useState(null);
   const [examResult, setExamResult] = useState(null);
+
+  // Helper: login guru + simpan ke localStorage
+  const loginGuru = (g) => {
+    try { localStorage.setItem("guru_login", JSON.stringify(g)); } catch {}
+    setGuru(g);
+    setScreen("guru-dashboard");
+  };
+
+  // Helper: logout guru + hapus dari localStorage
+  const logoutGuru = () => {
+    try { localStorage.removeItem("guru_login"); } catch {}
+    setGuru(null);
+    setScreen("login");
+  };
 
   return (
     <>
@@ -411,12 +438,12 @@ export default function App() {
       <div className="app">
         {screen === "login" && (
           <LoginScreen
-            onGuruLogin={(g) => { setGuru(g); setScreen("guru-dashboard"); }}
+            onGuruLogin={loginGuru}
             onStudentJoin={(d) => { setStudentData(d); setScreen("student-exam"); }}
           />
         )}
         {screen === "guru-dashboard" && (
-          <GuruDashboard guru={guru} onLogout={() => { setGuru(null); setScreen("login"); }} />
+          <GuruDashboard guru={guru} onLogout={logoutGuru} />
         )}
         {screen === "student-exam" && (
           <ErrorBoundary>
@@ -738,7 +765,7 @@ function UjianPage({ ujianList, onRefresh }) {
   const handleHapus = async (ujian) => {
     setSaving(true);
     try {
-      // ── PENGAMAN: Cek apakah ada peserta yang sedang ujian ──
+      // ── PENGAMAN 1: Cek apakah ada peserta yang sedang ujian ──
       if (!useDemo) {
         const pesertaAktif = await cekPesertaAktif(ujian.id);
         if (pesertaAktif.length > 0) {
@@ -752,22 +779,66 @@ function UjianPage({ ujianList, onRefresh }) {
           setConfirmHapus(null);
           return;
         }
+
+        // ── PENGAMAN 2: Cek apakah sudah ada hasil ujian tersimpan ──
+        const hasil = await supabase(`hasil?ujian_id=eq.${ujian.id}&select=id`);
+        if (hasil.length > 0) {
+          const lanjut = window.confirm(
+            `⚠️ Ujian ini sudah memiliki ${hasil.length} hasil siswa yang tersimpan.\n\n` +
+            `Jika ujian dihapus, SEMUA hasil siswa untuk ujian ini akan ikut terhapus.\n\n` +
+            `Yakin tetap mau menghapus?\n` +
+            `(Klik OK untuk hapus semua, atau Cancel untuk batal)`
+          );
+          if (!lanjut) {
+            setSaving(false);
+            setConfirmHapus(null);
+            return;
+          }
+        }
       }
 
       if (useDemo) {
         const idx = DEMO_UJIAN.findIndex(u => u.id === ujian.id);
         if (idx > -1) DEMO_UJIAN.splice(idx, 1);
       } else {
-        // Hapus soal dulu, baru ujian
-        await supabase(`soal?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
-        await supabase(`hasil?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
-        // Bersihkan juga record peserta_aktif yang sudah selesai untuk ujian ini
-        await supabase(`peserta_aktif?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
-        await supabase(`ujian?id=eq.${ujian.id}`, { method: "DELETE" });
+        // Hapus berurutan dengan error handling per-step
+        try {
+          await supabase(`soal?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+        } catch (err) {
+          throw new Error("Gagal hapus soal: " + err.message);
+        }
+        try {
+          await supabase(`hasil?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+        } catch (err) {
+          throw new Error("Gagal hapus hasil: " + err.message);
+        }
+        try {
+          await supabase(`peserta_aktif?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+        } catch (err) {
+          throw new Error("Gagal hapus peserta_aktif: " + err.message);
+        }
+        try {
+          await supabase(`ujian?id=eq.${ujian.id}`, { method: "DELETE" });
+        } catch (err) {
+          throw new Error("Gagal hapus ujian: " + err.message);
+        }
+
+        // Verifikasi: pastikan ujian benar-benar terhapus
+        const cek = await supabase(`ujian?id=eq.${ujian.id}&select=id`);
+        if (cek.length > 0) {
+          throw new Error(
+            "Ujian masih ada di database setelah dihapus. " +
+            "Kemungkinan ada constraint database yang mencegah penghapusan. " +
+            "Coba refresh halaman dan ulangi."
+          );
+        }
       }
       await onRefresh();
       setConfirmHapus(null);
-    } catch(e) { alert("Gagal hapus: " + e.message); }
+    } catch(e) {
+      console.error("handleHapus error:", e);
+      alert("Gagal hapus: " + e.message);
+    }
     setSaving(false);
   };
 
