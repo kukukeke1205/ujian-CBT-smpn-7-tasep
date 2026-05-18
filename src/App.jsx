@@ -1408,6 +1408,122 @@ function SoalPage({ ujianList, onRefresh }) {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  // ── EXPORT SOAL: helper buat HTML dokumen soal ──
+  // withKunci = true → sertakan kunci jawaban (untuk arsip pengawas)
+  const buatHtmlSoal = (withKunci) => {
+    const u = ujianList.find(uj => String(uj.id) === selectedUjian);
+    const namaMapel = u ? u.mapel : "-";
+    const namaKelas = u ? u.kelas : "-";
+    const durasi = u ? u.durasi : "-";
+    const HRF = ["A", "B", "C", "D"];
+
+    // Escape HTML supaya aman
+    const esc = (t) => String(t == null ? "" : t)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    const soalHtml = soalList.map((s, idx) => {
+      const opsiHtml = s.opsi.map((o, i) => {
+        const benar = withKunci && i === s.jawaban;
+        return `<div class="opsi${benar ? " benar" : ""}">${HRF[i]}. ${esc(o)}${benar ? " &nbsp;<b>(Kunci Jawaban)</b>" : ""}</div>`;
+      }).join("");
+      const gambarHtml = s.gambar
+        ? `<div class="gambar"><img src="${esc(s.gambar)}" alt="Gambar soal" /></div>`
+        : "";
+      return `
+        <div class="soal">
+          <div class="pertanyaan"><b>${idx + 1}.</b> ${esc(s.pertanyaan)}</div>
+          ${gambarHtml}
+          <div class="opsi-list">${opsiHtml}</div>
+        </div>`;
+    }).join("");
+
+    const kunciRingkas = withKunci
+      ? `<div class="kunci-box">
+           <h3>Kunci Jawaban</h3>
+           <div class="kunci-grid">
+             ${soalList.map((s, idx) => `<span>${idx + 1}. <b>${HRF[s.jawaban]}</b></span>`).join("")}
+           </div>
+         </div>`
+      : "";
+
+    return `<!DOCTYPE html>
+<html lang="id"><head><meta charset="UTF-8">
+<title>Soal ${esc(namaMapel)} - Kelas ${esc(namaKelas)}</title>
+<style>
+  body { font-family: 'Times New Roman', serif; font-size: 12pt; color: #000; margin: 0; padding: 30px; }
+  .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 10px; margin-bottom: 20px; }
+  .kop h1 { font-size: 14pt; margin: 0 0 4px; }
+  .kop h2 { font-size: 13pt; margin: 0; }
+  .info { margin-bottom: 16px; font-size: 11pt; }
+  .info table { width: 100%; }
+  .info td { padding: 2px 0; }
+  .soal { margin-bottom: 16px; page-break-inside: avoid; }
+  .pertanyaan { margin-bottom: 6px; }
+  .opsi-list { padding-left: 24px; }
+  .opsi { margin-bottom: 3px; }
+  .opsi.benar { background: #fff3cd; font-weight: bold; }
+  .gambar { margin: 8px 0 8px 24px; }
+  .gambar img { max-width: 380px; max-height: 260px; }
+  .kunci-box { margin-top: 30px; border: 2px solid #000; padding: 12px 16px; page-break-inside: avoid; }
+  .kunci-box h3 { margin: 0 0 8px; font-size: 12pt; }
+  .kunci-grid { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  .ttd { margin-top: 40px; width: 100%; }
+  .ttd td { width: 50%; text-align: center; vertical-align: top; font-size: 11pt; }
+  .ttd .nama { margin-top: 60px; font-weight: bold; text-decoration: underline; }
+</style></head><body>
+  <div class="kop">
+    <h1>SOAL UJIAN ${esc(namaMapel).toUpperCase()}</h1>
+    <h2>Kelas ${esc(namaKelas)}</h2>
+  </div>
+  <div class="info">
+    <table>
+      <tr><td>Mata Pelajaran</td><td>: ${esc(namaMapel)}</td>
+          <td>Jumlah Soal</td><td>: ${soalList.length} butir</td></tr>
+      <tr><td>Kelas</td><td>: ${esc(namaKelas)}</td>
+          <td>Alokasi Waktu</td><td>: ${esc(durasi)} menit</td></tr>
+      <tr><td>Nama</td><td>: ...........................</td>
+          <td>Nilai</td><td>: ...........................</td></tr>
+    </table>
+  </div>
+  <hr/>
+  <p><b>Petunjuk:</b> Pilihlah jawaban yang paling tepat dengan memberi tanda silang (X) pada huruf A, B, C, atau D.</p>
+  ${soalHtml}
+  ${kunciRingkas}
+  ${withKunci ? `
+  <table class="ttd">
+    <tr><td>Mengetahui,<br/>Kepala Sekolah<div class="nama">..........................</div></td>
+        <td>Guru Mata Pelajaran<div class="nama">..........................</div></td></tr>
+  </table>` : ""}
+</body></html>`;
+  };
+
+  // Cetak / Simpan sebagai PDF (pakai dialog print browser)
+  const handleCetakPDF = (withKunci) => {
+    if (soalList.length === 0) return alert("Belum ada soal untuk dicetak.");
+    const win = window.open("", "_blank");
+    if (!win) return alert("Popup diblokir. Izinkan popup untuk situs ini, lalu coba lagi.");
+    win.document.write(buatHtmlSoal(withKunci));
+    win.document.close();
+    // Beri jeda agar gambar sempat dimuat sebelum dialog print
+    win.onload = () => setTimeout(() => win.print(), 600);
+  };
+
+  // Download sebagai file Word (.doc)
+  const handleDownloadWord = (withKunci) => {
+    if (soalList.length === 0) return alert("Belum ada soal untuk diunduh.");
+    const u = ujianList.find(uj => String(uj.id) === selectedUjian);
+    const html = buatHtmlSoal(withKunci);
+    const blob = new Blob(["\ufeff", html], { type: "application/msword" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `Soal_${u ? u.mapel : "Ujian"}_Kelas_${u ? u.kelas : ""}${withKunci ? "_dengan_Kunci" : ""}.doc`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleSave = async () => {
     if (!selectedUjian) return alert("Pilih ujian terlebih dahulu.");
     if (!form.pertanyaan.trim()) return alert("Pertanyaan tidak boleh kosong.");
@@ -1964,6 +2080,36 @@ function SoalPage({ ujianList, onRefresh }) {
                 )}
               </div>
             </div>
+
+            {/* Panel Export Soal — untuk arsip pengawas */}
+            {soalList.length > 0 && (
+              <div style={{background:"var(--light)", border:"1px solid var(--border)", borderRadius:"var(--radius2)", padding:"14px", marginBottom:"16px"}}>
+                <div style={{fontSize:"13px", fontWeight:"700", color:"var(--navy3)", marginBottom:"4px"}}>
+                  📄 Cetak / Simpan Soal
+                </div>
+                <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"10px"}}>
+                  Untuk dikumpulkan ke pengawas atau diarsipkan.
+                </div>
+                <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+                  <button className="btn btn-blue" style={{fontSize:"12px"}} onClick={() => handleCetakPDF(false)}>
+                    🖨️ Cetak / PDF (Soal Saja)
+                  </button>
+                  <button className="btn btn-blue" style={{fontSize:"12px"}} onClick={() => handleCetakPDF(true)}>
+                    🖨️ Cetak / PDF (+ Kunci Jawaban)
+                  </button>
+                  <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => handleDownloadWord(false)}>
+                    📝 Download Word (Soal Saja)
+                  </button>
+                  <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => handleDownloadWord(true)}>
+                    📝 Download Word (+ Kunci Jawaban)
+                  </button>
+                </div>
+                <div style={{fontSize:"11px", color:"var(--gray)", marginTop:"8px"}}>
+                  💡 Untuk simpan PDF: pilih "Cetak", lalu di tujuan printer pilih <b>"Save as PDF"</b>.
+                </div>
+              </div>
+            )}
+
             {soalList.length === 0 ? (
               <div className="empty-state"><div className="icon">✏️</div><p>Belum ada soal. Tambahkan soal di atas.</p></div>
             ) : (
