@@ -37,7 +37,12 @@ function loadKatex() {
     script.src = KATEX_JS_URL;
     script.defer = true;
     script.onload = () => { katexReady = true; resolve(); };
-    script.onerror = () => reject(new Error("Gagal memuat KaTeX"));
+    script.onerror = () => {
+      // Reset supaya percobaan berikutnya bisa coba load lagi
+      katexPromise = null;
+      script.remove();
+      reject(new Error("Gagal memuat KaTeX"));
+    };
     document.head.appendChild(script);
   });
   return katexPromise;
@@ -47,23 +52,50 @@ function loadKatex() {
 // Cara pakai: <MathText text="Hasil $\sqrt{25}$ adalah 5" />
 function MathText({ text, displayMode = false }) {
   const ref = useRef(null);
-  const [, setReady] = useState(katexReady);
+  // state `ready` dipakai sebagai dependency useEffect render,
+  // supaya teks dirender ulang begitu KaTeX selesai dimuat.
+  const [ready, setReady] = useState(katexReady);
 
   useEffect(() => {
-    loadKatex().then(() => setReady(true)).catch(console.error);
+    let aktif = true;
+    loadKatex()
+      .then(() => { if (aktif) setReady(true); })
+      .catch(err => {
+        console.error(err);
+        // Walau KaTeX gagal dimuat, tetap set ready supaya
+        // teks ditampilkan apa adanya (tidak kosong).
+        if (aktif) setReady(true);
+      });
+    return () => { aktif = false; };
   }, []);
 
   useEffect(() => {
-    if (!ref.current || !window.katex || !text) return;
-
-    // Split text by $$...$$ (display) and $...$ (inline)
-    // Strategy: tokenize text jadi alternating [text, math, text, math, ...]
     const container = ref.current;
+    if (!container) return;
+
+    const isiText = text == null ? "" : String(text);
     container.innerHTML = ""; // clear
 
-    // Regex match $$...$$ first (display), then $...$ (inline)
+    // Helper: render teks biasa (mendukung \n)
+    const tulisTeksBiasa = (target, str) => {
+      str.split("\n").forEach((line, i, arr) => {
+        target.appendChild(document.createTextNode(line));
+        if (i < arr.length - 1) target.appendChild(document.createElement("br"));
+      });
+    };
+
+    // FALLBACK: kalau KaTeX belum siap, tampilkan teks apa adanya dulu.
+    // Begitu KaTeX siap, `ready` berubah → effect ini jalan lagi → dirender ulang dengan rumus.
+    if (!window.katex) {
+      tulisTeksBiasa(container, isiText);
+      return;
+    }
+
+    if (!isiText) return;
+
+    // Split text by $$...$$ (display) dan $...$ (inline)
     const regex = /(\$\$[^$]+\$\$|\$[^$\n]+\$)/g;
-    const parts = text.split(regex);
+    const parts = isiText.split(regex);
 
     parts.forEach(part => {
       if (!part) return;
@@ -86,14 +118,10 @@ function MathText({ text, displayMode = false }) {
         }
         container.appendChild(span);
       } else {
-        // Plain text - support \n untuk multi-line
-        part.split("\n").forEach((line, i, arr) => {
-          container.appendChild(document.createTextNode(line));
-          if (i < arr.length - 1) container.appendChild(document.createElement("br"));
-        });
+        tulisTeksBiasa(container, part);
       }
     });
-  }, [text]);
+  }, [text, ready]); // ← `ready` ditambahkan: render ulang saat KaTeX siap
 
   return <span ref={ref} style={{ display: displayMode ? "block" : "inline" }} />;
 }
