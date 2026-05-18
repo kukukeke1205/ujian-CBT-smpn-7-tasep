@@ -300,6 +300,71 @@ async function supabase(path, options = {}) {
 }
 
 // ============================================================
+// UPLOAD GAMBAR KE SUPABASE STORAGE
+// Nama bucket: "gambar-soal" (harus dibuat dulu di Supabase, lihat panduan)
+// ============================================================
+const STORAGE_BUCKET = "gambar-soal";
+
+async function uploadGambar(file, onProgress) {
+  if (!file) throw new Error("Tidak ada file dipilih");
+
+  // Validasi tipe file
+  const tipeValid = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+  if (!tipeValid.includes(file.type)) {
+    throw new Error("File harus berupa gambar (JPG, PNG, GIF, atau WEBP)");
+  }
+
+  // Validasi ukuran (maks 5 MB)
+  const maksUkuran = 5 * 1024 * 1024;
+  if (file.size > maksUkuran) {
+    throw new Error(`Ukuran gambar terlalu besar (${(file.size/1024/1024).toFixed(1)} MB). Maksimal 5 MB.`);
+  }
+
+  // Buat nama file unik: timestamp + random + ekstensi
+  const ext = file.name.split(".").pop().toLowerCase();
+  const namaFile = `soal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+  // Upload pakai XMLHttpRequest agar bisa lacak progress
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const url = `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${namaFile}`;
+
+    xhr.open("POST", url);
+    xhr.setRequestHeader("apikey", SUPABASE_ANON_KEY);
+    xhr.setRequestHeader("Authorization", `Bearer ${SUPABASE_ANON_KEY}`);
+    xhr.setRequestHeader("Content-Type", file.type);
+    xhr.setRequestHeader("x-upsert", "true");
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        // URL publik gambar
+        const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${STORAGE_BUCKET}/${namaFile}`;
+        resolve(publicUrl);
+      } else {
+        let pesan = "Gagal upload gambar";
+        try {
+          const err = JSON.parse(xhr.responseText);
+          if (err.message) pesan = err.message;
+          if (err.error === "Bucket not found") {
+            pesan = "Bucket 'gambar-soal' belum dibuat di Supabase. Lihat panduan setup.";
+          }
+        } catch {}
+        reject(new Error(pesan));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Koneksi gagal saat upload gambar"));
+    xhr.send(file);
+  });
+}
+
+// ============================================================
 // SUBMIT QUEUE SYSTEM
 // Antrian submit untuk mencegah overload saat banyak siswa
 // submit bersamaan
@@ -1306,6 +1371,10 @@ function SoalPage({ ujianList, onRefresh }) {
   const [previewSoal, setPreviewSoal] = useState([]);
   const [importing, setImporting] = useState(false);
   const [hapusSemua, setHapusSemua] = useState(false);
+  const [uploadingGambar, setUploadingGambar] = useState(false);
+  const [progressGambar, setProgressGambar] = useState(0);
+  const [errorGambar, setErrorGambar] = useState("");
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (selectedUjian) {
@@ -1317,6 +1386,26 @@ function SoalPage({ ujianList, onRefresh }) {
   const resetForm = () => {
     setForm({ pertanyaan: "", gambar: "", opsi: ["","","",""], jawaban: 0 });
     setEditSoal(null);
+    setErrorGambar("");
+    setProgressGambar(0);
+  };
+
+  // Handler saat guru pilih file gambar
+  const handlePilihGambar = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErrorGambar("");
+    setUploadingGambar(true);
+    setProgressGambar(0);
+    try {
+      const url = await uploadGambar(file, (p) => setProgressGambar(p));
+      setForm(p => ({ ...p, gambar: url }));
+    } catch (err) {
+      setErrorGambar(err.message);
+    }
+    setUploadingGambar(false);
+    // Reset input supaya bisa pilih file yang sama lagi
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleSave = async () => {
@@ -1642,17 +1731,76 @@ function SoalPage({ ujianList, onRefresh }) {
                 <LatexHelp />
               </div>
               <div className="form-field">
-                <label>🖼️ URL Gambar (opsional)</label>
+                <label>🖼️ Gambar Soal (opsional)</label>
+
+                {/* Input file tersembunyi */}
                 <input
-                  value={form.gambar}
-                  onChange={e => setForm(p=>({...p, gambar:e.target.value}))}
-                  placeholder="Paste link gambar dari ImgBB/Google Drive (kosongkan jika tidak ada)"
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/gif,image/webp"
+                  onChange={handlePilihGambar}
+                  style={{display:"none"}}
                 />
-                {form.gambar && (
-                  <div style={{marginTop:"8px", borderRadius:"var(--radius2)", overflow:"hidden", border:"1px solid var(--border)", maxHeight:"200px"}}>
-                    <img src={form.gambar} alt="Preview" style={{width:"100%", objectFit:"contain", maxHeight:"200px"}}
-                      onError={e => { e.target.style.display="none"; }}
-                    />
+
+                {/* Tombol pilih gambar */}
+                {!form.gambar && !uploadingGambar && (
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    style={{
+                      width:"100%", padding:"16px", border:"2px dashed var(--border)",
+                      borderRadius:"var(--radius2)", background:"var(--light)",
+                      cursor:"pointer", fontSize:"14px", color:"var(--blue)", fontWeight:"600",
+                      display:"flex", alignItems:"center", justifyContent:"center", gap:"8px"
+                    }}
+                  >
+                    📁 Pilih Gambar dari Komputer / HP
+                  </button>
+                )}
+
+                {/* Progress upload */}
+                {uploadingGambar && (
+                  <div style={{padding:"16px", border:"1px solid var(--border)", borderRadius:"var(--radius2)", background:"var(--light)"}}>
+                    <div style={{fontSize:"13px", color:"var(--navy3)", fontWeight:"600", marginBottom:"8px"}}>
+                      ⏳ Mengupload gambar... {progressGambar}%
+                    </div>
+                    <div style={{height:"8px", background:"var(--border)", borderRadius:"99px", overflow:"hidden"}}>
+                      <div style={{height:"100%", width:`${progressGambar}%`, background:"var(--blue)", transition:"width 0.2s"}} />
+                    </div>
+                  </div>
+                )}
+
+                {/* Pesan error */}
+                {errorGambar && (
+                  <div style={{marginTop:"8px", padding:"10px 12px", background:"var(--red3)", border:"1px solid var(--red)", borderRadius:"var(--radius2)", fontSize:"12px", color:"var(--red2)"}}>
+                    ⚠️ {errorGambar}
+                  </div>
+                )}
+
+                {/* Preview gambar yang sudah ke-upload */}
+                {form.gambar && !uploadingGambar && (
+                  <div>
+                    <div style={{marginTop:"8px", borderRadius:"var(--radius2)", overflow:"hidden", border:"1px solid var(--border)", maxHeight:"220px", textAlign:"center", background:"var(--light)"}}>
+                      <img src={form.gambar} alt="Preview" style={{maxWidth:"100%", objectFit:"contain", maxHeight:"220px"}}
+                        onError={e => { e.target.style.display="none"; }}
+                      />
+                    </div>
+                    <div style={{display:"flex", gap:"8px", marginTop:"8px"}}>
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        style={{flex:1, padding:"8px", border:"1px solid var(--border)", borderRadius:"var(--radius2)", background:"white", cursor:"pointer", fontSize:"12px", color:"var(--blue)", fontWeight:"600"}}
+                      >
+                        🔄 Ganti Gambar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setForm(p => ({...p, gambar:""}))}
+                        style={{flex:1, padding:"8px", border:"1px solid var(--red)", borderRadius:"var(--radius2)", background:"white", cursor:"pointer", fontSize:"12px", color:"var(--red2)", fontWeight:"600"}}
+                      >
+                        🗑️ Hapus Gambar
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
