@@ -1,6 +1,74 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 
 // ============================================================
+// LATEX → UNICODE (untuk Word, PDF, dan copy-paste)
+// Mengubah rumus LaTeX di antara $...$ jadi karakter Unicode
+// yang dijamin tampil di Word/PDF tanpa render khusus.
+// ============================================================
+const SUPERSCRIPT = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹",
+  "+":"⁺","-":"⁻","=":"⁼","(":"⁽",")":"⁾","a":"ᵃ","b":"ᵇ","c":"ᶜ","d":"ᵈ","e":"ᵉ","f":"ᶠ","g":"ᵍ","h":"ʰ","i":"ⁱ","j":"ʲ","k":"ᵏ","l":"ˡ","m":"ᵐ","n":"ⁿ","o":"ᵒ","p":"ᵖ","r":"ʳ","s":"ˢ","t":"ᵗ","u":"ᵘ","v":"ᵛ","w":"ʷ","x":"ˣ","y":"ʸ","z":"ᶻ"};
+const SUBSCRIPT = { "0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉",
+  "+":"₊","-":"₋","=":"₌","(":"₍",")":"₎","a":"ₐ","e":"ₑ","h":"ₕ","i":"ᵢ","j":"ⱼ","k":"ₖ","l":"ₗ","m":"ₘ","n":"ₙ","o":"ₒ","p":"ₚ","r":"ᵣ","s":"ₛ","t":"ₜ","u":"ᵤ","v":"ᵥ","x":"ₓ"};
+
+const toSuperscript = (str) => [...str].map(c => SUPERSCRIPT[c] || c).join("");
+const toSubscript = (str) => [...str].map(c => SUBSCRIPT[c] || c).join("");
+
+// Konversi 1 ekspresi LaTeX (tanpa $) jadi teks Unicode
+function konversiLatexEkspresi(latex) {
+  let s = latex;
+
+  // STEP 1: \sqrt[n]{x} dan \sqrt{x} dulu (sebelum brace lain diproses)
+  s = s.replace(/\\sqrt\[([^\]]+)\]\{([^{}]*)\}/g, (_, n, x) => `${toSuperscript(n)}√(${x})`);
+  s = s.replace(/\\sqrt\{([^{}]*)\}/g, (_, x) => `√(${x})`);
+
+  // STEP 2: Pecahan
+  const pecahanKhusus = { "1/2":"½","1/3":"⅓","2/3":"⅔","1/4":"¼","3/4":"¾","1/5":"⅕","2/5":"⅖","3/5":"⅗","4/5":"⅘","1/6":"⅙","5/6":"⅚","1/8":"⅛","3/8":"⅜","5/8":"⅝","7/8":"⅞" };
+  s = s.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, (_, a, b) => {
+    const key = `${a}/${b}`;
+    return pecahanKhusus[key] || `(${a}/${b})`;
+  });
+
+  // STEP 3: Pangkat (superscript) — termasuk ^\circ
+  s = s.replace(/\^\{([^{}]+)\}/g, (_, x) => toSuperscript(x));
+  // ^ diikuti \xxx (perintah LaTeX) — handle khusus ^\circ
+  s = s.replace(/\^\\circ\b/g, "°");
+  s = s.replace(/\^\\degree\b/g, "°");
+  s = s.replace(/\^(\w)/g, (_, x) => toSuperscript(x));
+
+  // STEP 4: Subscript
+  s = s.replace(/_\{([^{}]+)\}/g, (_, x) => toSubscript(x));
+  s = s.replace(/_(\w)/g, (_, x) => toSubscript(x));
+
+  // STEP 5: Simbol langsung (setelah ^/_ supaya tidak interferensi)
+  const simbol = {
+    "\\pi": "π", "\\theta": "θ", "\\alpha": "α", "\\beta": "β", "\\gamma": "γ",
+    "\\delta": "δ", "\\Delta": "Δ", "\\sum": "Σ", "\\infty": "∞",
+    "\\times": "×", "\\div": "÷", "\\cdot": "·", "\\pm": "±", "\\mp": "∓",
+    "\\neq": "≠", "\\leq": "≤", "\\geq": "≥", "\\approx": "≈",
+    "\\rightarrow": "→", "\\leftarrow": "←", "\\Rightarrow": "⇒",
+    "\\circ": "°", "\\degree": "°",
+  };
+  for (const [k, v] of Object.entries(simbol)) {
+    s = s.split(k).join(v);
+  }
+
+  // STEP 6: Bersihkan brace dan backslash sisa
+  s = s.replace(/[{}]/g, "");
+  s = s.replace(/\\([a-zA-Z]+)/g, "$1");
+
+  return s;
+}
+
+// Konversi seluruh teks: cari $...$ dan $$...$$, konversi isinya
+function latexToText(text) {
+  if (text == null) return "";
+  const str = String(text);
+  return str.replace(/\$\$([^$]+)\$\$|\$([^$\n]+)\$/g, (_, displayMath, inlineMath) => {
+    return konversiLatexEkspresi(displayMath || inlineMath);
+  });
+}
+
+// ============================================================
 // KATEX LOADER & RENDERER
 // Load KaTeX dari CDN untuk render rumus matematika
 // Format yang dipakai:
@@ -1060,6 +1128,11 @@ function GuruDashboard({ guru, onLogout }) {
 // ---- Dashboard Overview ----
 function DashboardPage({ ujianList, hasilList }) {
   const rataRata = hasilList.length ? Math.round(hasilList.reduce((a,h) => a + (h.nilai||0), 0) / hasilList.length) : 0;
+  // Helper: ambil KKM dari ujian terkait hasil. Default 75 kalau tidak ketemu.
+  const kkmHasil = (h) => {
+    const u = ujianList.find(uj => uj.id === h.ujian_id);
+    return u && u.kkm ? u.kkm : 75;
+  };
   return (
     <>
       <div className="page-header"><h1>Dashboard</h1><p>Ringkasan aktivitas ujian sekolah</p></div>
@@ -1092,7 +1165,7 @@ function DashboardPage({ ujianList, hasilList }) {
                     <td>{h.kelas}</td>
                     <td>{h.mapel}</td>
                     <td><strong style={{fontFamily:"var(--mono)"}}>{h.nilai}</strong></td>
-                    <td><span className={`badge ${h.nilai >= 75 ? "badge-green" : "badge-red"}`}>{h.nilai >= 75 ? "Lulus" : "Remedi"}</span></td>
+                    <td><span className={`badge ${h.nilai >= kkmHasil(h) ? "badge-green" : "badge-red"}`}>{h.nilai >= kkmHasil(h) ? "Lulus" : "Remedi"}</span></td>
                   </tr>
                 ))}
               </tbody>
@@ -1109,12 +1182,12 @@ function UjianPage({ ujianList, onRefresh }) {
   const [showForm, setShowForm] = useState(false);
   const [showKey, setShowKey] = useState(null);
   const [editUjian, setEditUjian] = useState(null); // ujian yang sedang diedit
-  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "", durasi: 60, jam_buka: "", jam_tutup: "" });
+  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "" });
   const [saving, setSaving] = useState(false);
   const [confirmHapus, setConfirmHapus] = useState(null); // ujian yang akan dihapus
 
   const resetForm = () => {
-    setForm({ mapel: MAPEL[0], kelas: "", durasi: 60, jam_buka: "", jam_tutup: "" });
+    setForm({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "" });
     setEditUjian(null);
     setShowForm(false);
   };
@@ -1126,7 +1199,7 @@ function UjianPage({ ujianList, onRefresh }) {
       if (useDemo) {
         DEMO_UJIAN.push({ ...form, durasi: Number(form.durasi), key: genKey(), aktif: true, soal: [], id: Date.now() });
       } else {
-        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), key: genKey(), aktif: true, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
+        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, key: genKey(), aktif: true, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
       }
       await onRefresh();
       resetForm();
@@ -1140,9 +1213,9 @@ function UjianPage({ ujianList, onRefresh }) {
     try {
       if (useDemo) {
         const idx = DEMO_UJIAN.findIndex(u => u.id === editUjian.id);
-        if (idx > -1) DEMO_UJIAN[idx] = { ...DEMO_UJIAN[idx], mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null };
+        if (idx > -1) DEMO_UJIAN[idx] = { ...DEMO_UJIAN[idx], mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null };
       } else {
-        await supabase(`ujian?id=eq.${editUjian.id}`, { method: "PATCH", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
+        await supabase(`ujian?id=eq.${editUjian.id}`, { method: "PATCH", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
       }
       await onRefresh();
       resetForm();
@@ -1244,7 +1317,7 @@ function UjianPage({ ujianList, onRefresh }) {
 
   const bukaFormEdit = (ujian) => {
     setEditUjian(ujian);
-    setForm({ mapel: ujian.mapel, kelas: ujian.kelas, durasi: ujian.durasi, jam_buka: ujian.jam_buka || "", jam_tutup: ujian.jam_tutup || "" });
+    setForm({ mapel: ujian.mapel, kelas: ujian.kelas, durasi: ujian.durasi, kkm: ujian.kkm || 75, jam_buka: ujian.jam_buka || "", jam_tutup: ujian.jam_tutup || "" });
     setShowForm(true);
     window.scrollTo(0, 0);
   };
@@ -1302,6 +1375,7 @@ function UjianPage({ ujianList, onRefresh }) {
                 </select>
               </div>
               <div className="form-field"><label>Durasi (menit)</label><input type="number" value={form.durasi} onChange={e => setForm(p=>({...p, durasi:e.target.value}))} /></div>
+              <div className="form-field"><label>KKM (Nilai Minimal Lulus)</label><input type="number" min="0" max="100" value={form.kkm} onChange={e => setForm(p=>({...p, kkm:e.target.value}))} placeholder="75" /></div>
               <div className="form-field"><label>⏰ Jam Buka (opsional)</label><input type="time" value={form.jam_buka} onChange={e => setForm(p=>({...p, jam_buka:e.target.value}))} /></div>
               <div className="form-field"><label>⏰ Jam Tutup (opsional)</label><input type="time" value={form.jam_tutup} onChange={e => setForm(p=>({...p, jam_tutup:e.target.value}))} /></div>
             </div>
@@ -1445,8 +1519,8 @@ function SoalPage({ ujianList, onRefresh }) {
     const durasi = u ? u.durasi : "-";
     const HRF = ["A", "B", "C", "D"];
 
-    // Escape HTML supaya aman
-    const esc = (t) => String(t == null ? "" : t)
+    // Escape HTML supaya aman + konversi rumus LaTeX ke Unicode
+    const esc = (t) => latexToText(t == null ? "" : t)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
     const soalHtml = soalList.map((s, idx) => {
@@ -2206,6 +2280,11 @@ function MonitorPage({ ujianList }) {
   const [unlockedSiswa, setUnlockedSiswa] = useState(() => {
     try { return JSON.parse(localStorage.getItem("unlocked_siswa") || "[]"); } catch { return []; }
   });
+  // Helper: ambil KKM dari ujian terkait hasil
+  const kkmHasil = (h) => {
+    const u = ujianList.find(uj => uj.id === h.ujian_id);
+    return u && u.kkm ? u.kkm : 75;
+  };
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -2482,8 +2561,8 @@ function MonitorPage({ ujianList }) {
                     </td>
                     <td>{h.kelas}</td>
                     <td>{h.mapel}</td>
-                    <td><strong style={{fontFamily:"var(--mono)", color: h.nilai>=75?"var(--green2)":"var(--red2)"}}>{h.nilai}</strong></td>
-                    <td><span className={`badge ${h.nilai>=75?"badge-green":"badge-red"}`}>{h.nilai>=75?"Lulus":"Remedi"}</span></td>
+                    <td><strong style={{fontFamily:"var(--mono)", color: h.nilai>=kkmHasil(h)?"var(--green2)":"var(--red2)"}}>{h.nilai}</strong></td>
+                    <td><span className={`badge ${h.nilai>=kkmHasil(h)?"badge-green":"badge-red"}`}>{h.nilai>=kkmHasil(h)?"Lulus":"Remedi"}</span></td>
                     <td>
                       {(h.pelanggaran||0) === 0
                         ? <span style={{color:"var(--green2)", fontSize:"12px"}}>✅ Bersih</span>
@@ -2566,6 +2645,11 @@ function BukaKunciManual({ onBukaKunci }) {
 function HasilPage({ hasilList, ujianList }) {
   const [filter, setFilter] = useState("");
   const [tabView, setTabView] = useState("semua"); // semua | curiga
+  // Helper: ambil KKM dari ujian terkait hasil. Default 75 kalau tidak ketemu.
+  const kkmHasil = (h) => {
+    const u = ujianList.find(uj => uj.id === h.ujian_id);
+    return u && u.kkm ? u.kkm : 75;
+  };
   const filtered = hasilList.filter(h => {
     const matchMapel = filter ? h.mapel === filter : true;
     const matchTab = tabView === "curiga" ? h.mencurigakan : true;
@@ -2576,7 +2660,7 @@ function HasilPage({ hasilList, ujianList }) {
   const exportCSV = () => {
     const rows = [
       ["No","Nama","Kelas","Mata Pelajaran","Benar","Total","Nilai","Status","Pelanggaran","Mencurigakan"],
-      ...filtered.map((h,i) => [i+1, h.nama_siswa, h.kelas, h.mapel, h.benar, h.total, h.nilai, h.nilai>=75?"Lulus":"Remedi", h.pelanggaran||0, h.mencurigakan?"Ya":"Tidak"])
+      ...filtered.map((h,i) => [i+1, h.nama_siswa, h.kelas, h.mapel, h.benar, h.total, h.nilai, h.nilai>=kkmHasil(h)?"Lulus":"Remedi", h.pelanggaran||0, h.mencurigakan?"Ya":"Tidak"])
     ];
     const csv = rows.map(r => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -2640,8 +2724,8 @@ function HasilPage({ hasilList, ujianList }) {
                     <td>{h.mapel}</td>
                     <td style={{fontFamily:"var(--mono)"}}>{h.benar}</td>
                     <td style={{fontFamily:"var(--mono)"}}>{h.total}</td>
-                    <td><strong style={{fontFamily:"var(--mono)", color: h.nilai >= 75 ? "var(--green2)" : "var(--red2)"}}>{h.nilai}</strong></td>
-                    <td><span className={`badge ${h.nilai >= 75 ? "badge-green" : "badge-red"}`}>{h.nilai >= 75 ? "Lulus" : "Remedi"}</span></td>
+                    <td><strong style={{fontFamily:"var(--mono)", color: h.nilai >= kkmHasil(h) ? "var(--green2)" : "var(--red2)"}}>{h.nilai}</strong></td>
+                    <td><span className={`badge ${h.nilai >= kkmHasil(h) ? "badge-green" : "badge-red"}`}>{h.nilai >= kkmHasil(h) ? "Lulus" : "Remedi"}</span></td>
                     <td>
                       {(h.pelanggaran||0) === 0
                         ? <span style={{color:"var(--green2)", fontSize:"12px", fontWeight:"600"}}>✅ Bersih</span>
@@ -3035,7 +3119,7 @@ function StudentExam({ data, onFinish }) {
     }
 
     if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
-    onFinish({ ...hasilData });
+    onFinish({ ...hasilData, kkm: ujian.kkm || 75 });
   }, [jawaban, soal, siswa, ujian, onFinish, tabViolation, submitting]);
 
   const HURUF = ["A","B","C","D"];
@@ -3246,7 +3330,8 @@ function StudentExam({ data, onFinish }) {
 // RESULT SCREEN
 // ============================================================
 function ResultScreen({ result, onBack }) {
-  const lulus = result.nilai >= 75;
+  const kkm = result.kkm || 75;
+  const lulus = result.nilai >= kkm;
   return (
     <div className="result-wrap">
       <div className="result-card">
@@ -3262,7 +3347,7 @@ function ResultScreen({ result, onBack }) {
           <div className="result-stat"><div className="val">{result.total}</div><div className="lbl">Total Soal</div></div>
         </div>
         <div style={{background: lulus ? "var(--green3)" : "var(--red3)", borderRadius:"var(--radius2)", padding:"12px", marginBottom:"20px", fontSize:"14px", color: lulus ? "var(--green2)" : "var(--red2)", fontWeight:"600"}}>
-          {lulus ? "✅ Nilai Anda memenuhi KKM (75)" : "❌ Nilai belum memenuhi KKM (75) — Perlu remedi"}
+          {lulus ? `✅ Nilai Anda memenuhi KKM (${kkm})` : `❌ Nilai belum memenuhi KKM (${kkm}) — Perlu remedi`}
         </div>
         <button className="btn btn-blue" style={{width:"100%", padding:"12px"}} onClick={onBack}>🏠 Kembali ke Halaman Utama</button>
       </div>
