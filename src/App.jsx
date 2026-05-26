@@ -1964,10 +1964,16 @@ function SoalPage({ ujianList, onRefresh }) {
     reader.onload = (e) => {
       try {
         if (window.mammoth) {
-          // Pakai convertToMarkdown supaya bullet/numbering Word terbaca
-          window.mammoth.convertToMarkdown({ arrayBuffer: e.target.result })
+          // PENTING: pakai convertToHtml (ini yang tersedia di mammoth.browser).
+          // convertToMarkdown TIDAK ADA di versi browser, cuma di Node.js.
+          window.mammoth.convertToHtml({ arrayBuffer: e.target.result })
             .then(result => {
-              const text = result.value;
+              // Convert HTML → teks dengan format yang bisa diparse:
+              //   <li> jadi "- ..." (bullet)
+              //   <strong>/<b> jadi "**...**"
+              //   <p> jadi baris baru
+              const html = result.value;
+              const text = htmlToText(html);
               const parsed = parseTextToSoal(text);
               if (parsed.length === 0) {
                 setUploadStatus("❌ Tidak ada soal yang terbaca. Pastikan tiap soal punya 4 opsi (A-D) dan 1 kunci jawaban.");
@@ -1976,7 +1982,7 @@ function SoalPage({ ujianList, onRefresh }) {
                 setUploadStatus(`✅ Berhasil membaca ${parsed.length} soal. Cek preview lalu klik Import.`);
               }
             })
-            .catch(err => setUploadStatus("❌ Gagal membaca file: " + err.message));
+            .catch(err => setUploadStatus("❌ Gagal membaca file Word: " + err.message));
         } else {
           setUploadStatus("❌ Library Word belum siap. Refresh halaman dan coba lagi.");
         }
@@ -1985,6 +1991,40 @@ function SoalPage({ ujianList, onRefresh }) {
       }
     };
     reader.readAsArrayBuffer(file);
+  };
+
+  // Helper: convert HTML dari mammoth jadi teks yang bisa diparse parseTextToSoal
+  // - <li> → "- " (bullet)
+  // - <strong>/<b> → "**...**" (markdown bold)
+  // - <p>/<br> → newline
+  // - Hapus tag HTML sisanya
+  const htmlToText = (html) => {
+    if (!html) return "";
+    let s = html;
+    // Decode entitas HTML umum sebelum strip tag
+    s = s.replace(/&nbsp;/gi, " ");
+    // <strong>, <b> → **...**
+    s = s.replace(/<\/?(?:strong|b)\b[^>]*>/gi, "**");
+    // <em>, <i> → *...*
+    s = s.replace(/<\/?(?:em|i)\b[^>]*>/gi, "*");
+    // <li> → newline + "- " ; </li> → newline
+    s = s.replace(/<li\b[^>]*>/gi, "\n- ");
+    s = s.replace(/<\/li>/gi, "\n");
+    // <p>, <br>, </p>, </ol>, </ul>, <tr>, </tr> → newline
+    s = s.replace(/<(?:p|br|div|tr)\b[^>]*\/?>/gi, "\n");
+    s = s.replace(/<\/(?:p|div|ol|ul|tr|table|h[1-6])>/gi, "\n");
+    // Tag-tag lain (img, span, dll) → buang saja
+    s = s.replace(/<[^>]+>/g, "");
+    // Decode entitas
+    s = s.replace(/&amp;/g, "&")
+         .replace(/&lt;/g, "<")
+         .replace(/&gt;/g, ">")
+         .replace(/&quot;/g, '"')
+         .replace(/&#39;/g, "'")
+         .replace(/&hellip;/g, "…");
+    // Rapikan whitespace berlebihan
+    s = s.replace(/\n{3,}/g, "\n\n");
+    return s.trim();
   };
 
   // Parse baris Excel → array soal
