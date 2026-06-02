@@ -2219,6 +2219,7 @@ function SoalPage({ ujianList, onRefresh }) {
         hasil.push({
           id: Date.now() + hasil.length,
           pertanyaan: current.pertanyaan,
+          narasi: current.narasi || null,
           opsi: current.opsi.slice(0, 4),
           jawaban: current.jawaban || 0,
         });
@@ -2282,6 +2283,13 @@ function SoalPage({ ujianList, onRefresh }) {
       if (!current) {
         current = { pertanyaan: line, opsi: [], jawaban: 0 };
       } else if (!current.pertanyaan) {
+        // Kalau sudah ada bullet ter-buffer SEBELUM baris pertanyaan biasa ini,
+        // bullet itu sebenarnya NARASI/ilustrasi (bukan opsi). Pindahkan ke narasi
+        // supaya tidak salah dihitung sebagai pilihan jawaban.
+        if (bulletBuffer.length > 0) {
+          current.narasi = (current.narasi ? current.narasi + "\n" : "") + bulletBuffer.join("\n");
+          bulletBuffer = [];
+        }
         current.pertanyaan = line;
       } else {
         // Lanjutan pertanyaan (kalau opsi belum ada dan bullet belum ada)
@@ -2319,7 +2327,7 @@ function SoalPage({ ujianList, onRefresh }) {
           const idx = DEMO_UJIAN.findIndex(u => String(u.id) === selectedUjian);
           if (idx > -1) DEMO_UJIAN[idx].soal = [...(DEMO_UJIAN[idx].soal||[]), s];
         } else {
-          await supabase("soal", { method: "POST", body: JSON.stringify({ ujian_id: Number(selectedUjian), pertanyaan: s.pertanyaan, opsi: s.opsi, jawaban: s.jawaban }) });
+          await supabase("soal", { method: "POST", body: JSON.stringify({ ujian_id: Number(selectedUjian), pertanyaan: s.pertanyaan, narasi: s.narasi || null, narasi_id: s.narasi ? ("narasi_imp_" + (Date.now() + berhasil)) : null, opsi: s.opsi, jawaban: s.jawaban }) });
         }
         berhasil++;
       }
