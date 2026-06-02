@@ -2245,9 +2245,17 @@ function SoalPage({ ujianList, onRefresh }) {
 
       // Cek opsi format "A. xxx" atau "A) xxx"
       const matchOpsiHuruf = line.match(POLA_OPSI_HURUF);
-      if (matchOpsiHuruf && current && current.pertanyaan) {
-        current.opsi.push(matchOpsiHuruf[2].trim());
-        continue;
+      if (matchOpsiHuruf && current) {
+        // Kalau pertanyaan masih ter-buffer (mis. pertanyaan berasal dari numbered list
+        // Word), jadikan buffer itu sebagai pertanyaan dulu sebelum mengisi opsi.
+        if (!current.pertanyaan && bulletBuffer.length > 0) {
+          current.pertanyaan = bulletBuffer.join(" ");
+          bulletBuffer = [];
+        }
+        if (current.pertanyaan) {
+          current.opsi.push(matchOpsiHuruf[2].trim());
+          continue;
+        }
       }
 
       // Cek pertanyaan format "1. xxx" atau "1) xxx"
