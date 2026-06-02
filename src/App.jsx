@@ -636,24 +636,45 @@ function shuffleArray(arr) {
   return a;
 }
 
-// Acak soal DAN opsi jawaban, kembalikan soal dengan mapping jawaban benar
+// Helper: acak opsi sebuah soal, kembalikan soal dengan jawaban yang sudah disesuaikan
+function acakOpsiSoal(s) {
+  let opsi = s.opsi;
+  if (!Array.isArray(opsi)) {
+    try { opsi = JSON.parse(opsi); } catch { opsi = ["A","B","C","D"]; }
+  }
+  if (!opsi || opsi.length === 0) opsi = ["A","B","C","D"];
+  const jawabanIdx = typeof s.jawaban === 'number' ? s.jawaban : 0;
+  const jawabanAsli = opsi[jawabanIdx] ?? opsi[0];
+  const opsiAcak = shuffleArray([...opsi]);
+  const jawabanBaru = opsiAcak.indexOf(jawabanAsli);
+  return { ...s, opsi: opsiAcak, jawaban: jawabanBaru < 0 ? 0 : jawabanBaru };
+}
+
+// Acak soal DAN opsi jawaban, kembalikan soal dengan mapping jawaban benar.
+// Soal ber-narasi (narasi_id) dikelompokkan sebagai BLOK — urutan dalam blok
+// dipertahankan sesuai input guru, hanya posisi antar-blok yang diacak.
 function shuffleSoalDanOpsi(soalAsli) {
   if (!soalAsli || soalAsli.length === 0) return [];
-  const soalAcak = shuffleArray(soalAsli);
-  return soalAcak.map(s => {
-    // Pastikan opsi adalah array yang valid
-    let opsi = s.opsi;
-    if (!Array.isArray(opsi)) {
-      try { opsi = JSON.parse(opsi); } catch { opsi = ["A","B","C","D"]; }
-    }
-    if (!opsi || opsi.length === 0) opsi = ["A","B","C","D"];
 
-    const jawabanIdx = typeof s.jawaban === 'number' ? s.jawaban : 0;
-    const jawabanAsli = opsi[jawabanIdx] ?? opsi[0];
-    const opsiAcak = shuffleArray([...opsi]);
-    const jawabanBaru = opsiAcak.indexOf(jawabanAsli);
-    return { ...s, opsi: opsiAcak, jawaban: jawabanBaru < 0 ? 0 : jawabanBaru };
+  // Pisahkan soal mandiri dan kelompok narasi
+  const soalMandiri = soalAsli.filter(s => !s.narasi_id);
+  const kelompokMap = new Map(); // narasi_id → soal[]
+  soalAsli.forEach(s => {
+    if (s.narasi_id) {
+      if (!kelompokMap.has(s.narasi_id)) kelompokMap.set(s.narasi_id, []);
+      kelompokMap.get(s.narasi_id).push(s);
+    }
   });
+
+  // Buat "unit" acak: setiap mandiri = 1 unit, setiap blok narasi = 1 unit
+  const units = [
+    ...soalMandiri.map(s => [s]),         // unit tunggal
+    ...Array.from(kelompokMap.values()),   // unit blok (urutan dalam blok tetap)
+  ];
+  const unitsAcak = shuffleArray(units);
+
+  // Gabungkan dan acak opsi tiap soal
+  return unitsAcak.flat().map(acakOpsiSoal);
 }
 
 // ============================================================
@@ -1214,7 +1235,7 @@ function GuruDashboard({ guru, onLogout }) {
       } else {
         // Load ujian, soal, dan hasil sekaligus
         const [ujianRaw, soalRaw, hasilRaw] = await Promise.all([
-          supabase("ujian?order=id.desc"),
+          supabase("ujian?deleted_at=is.null&order=id.desc"),
           supabase("soal?order=ujian_id.asc,id.asc"),
           supabase("hasil?order=id.desc"),
         ]);
@@ -1359,6 +1380,39 @@ function UjianPage({ ujianList, onRefresh }) {
   const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "" });
   const [saving, setSaving] = useState(false);
   const [confirmHapus, setConfirmHapus] = useState(null); // ujian yang akan dihapus
+  const [showRecycleBin, setShowRecycleBin] = useState(false);
+  const [recycleBinList, setRecycleBinList] = useState([]);
+  const [loadingBin, setLoadingBin] = useState(false);
+
+  const loadRecycleBin = async () => {
+    setLoadingBin(true);
+    try {
+      const data = await supabase("ujian?deleted_at=not.is.null&order=deleted_at.desc");
+      setRecycleBinList(data);
+    } catch(e) { alert("Gagal memuat recycle bin: " + e.message); }
+    setLoadingBin(false);
+  };
+
+  const handleRestore = async (ujian) => {
+    if (!window.confirm(`Pulihkan ujian "${ujian.mapel} — Kelas ${ujian.kelas}"?`)) return;
+    try {
+      await supabase(`ujian?id=eq.${ujian.id}`, { method: "PATCH", body: JSON.stringify({ deleted_at: null }) });
+      await loadRecycleBin();
+      await onRefresh();
+    } catch(e) { alert("Gagal memulihkan ujian: " + e.message); }
+  };
+
+  const handleHapusPermanent = async (ujian) => {
+    if (!window.confirm(`Hapus PERMANEN ujian "${ujian.mapel} — Kelas ${ujian.kelas}"?\n\nSemua soal dan hasil siswa akan ikut terhapus dan TIDAK BISA dipulihkan.`)) return;
+    try {
+      await supabase(`soal?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+      await supabase(`hasil?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+      await supabase(`peserta_aktif?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
+      await supabase(`ujian?id=eq.${ujian.id}`, { method: "DELETE" });
+      await loadRecycleBin();
+      await onRefresh();
+    } catch(e) { alert("Gagal hapus permanen: " + e.message); }
+  };
 
   const resetForm = () => {
     setForm({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "" });
@@ -1436,37 +1490,11 @@ function UjianPage({ ujianList, onRefresh }) {
         const idx = DEMO_UJIAN.findIndex(u => u.id === ujian.id);
         if (idx > -1) DEMO_UJIAN.splice(idx, 1);
       } else {
-        // Hapus berurutan dengan error handling per-step
-        try {
-          await supabase(`soal?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
-        } catch (err) {
-          throw new Error("Gagal hapus soal: " + err.message);
-        }
-        try {
-          await supabase(`hasil?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
-        } catch (err) {
-          throw new Error("Gagal hapus hasil: " + err.message);
-        }
-        try {
-          await supabase(`peserta_aktif?ujian_id=eq.${ujian.id}`, { method: "DELETE" });
-        } catch (err) {
-          throw new Error("Gagal hapus peserta_aktif: " + err.message);
-        }
-        try {
-          await supabase(`ujian?id=eq.${ujian.id}`, { method: "DELETE" });
-        } catch (err) {
-          throw new Error("Gagal hapus ujian: " + err.message);
-        }
-
-        // Verifikasi: pastikan ujian benar-benar terhapus
-        const cek = await supabase(`ujian?id=eq.${ujian.id}&select=id`);
-        if (cek.length > 0) {
-          throw new Error(
-            "Ujian masih ada di database setelah dihapus. " +
-            "Kemungkinan ada constraint database yang mencegah penghapusan. " +
-            "Coba refresh halaman dan ulangi."
-          );
-        }
+        // Soft delete: tandai deleted_at saja, data tetap aman di database
+        await supabase(`ujian?id=eq.${ujian.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ deleted_at: new Date().toISOString(), aktif: false }),
+        });
       }
       await onRefresh();
       setConfirmHapus(null);
@@ -1511,7 +1539,10 @@ function UjianPage({ ujianList, onRefresh }) {
       <div className="card">
         <div className="card-header">
           <h2>Daftar Ujian ({ujianList.length})</h2>
-          <button className="btn btn-blue" onClick={() => { resetForm(); setShowForm(true); }}>+ Buat Ujian</button>
+          <div style={{display:"flex", gap:"8px"}}>
+            <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => { setShowRecycleBin(true); loadRecycleBin(); }}>♻️ Recycle Bin</button>
+            <button className="btn btn-blue" onClick={() => { resetForm(); setShowForm(true); }}>+ Buat Ujian</button>
+          </div>
         </div>
 
         {/* Form Buat / Edit Ujian */}
@@ -1619,15 +1650,56 @@ function UjianPage({ ujianList, onRefresh }) {
             <p style={{textAlign:"center", color:"var(--gray)"}}>
               Anda akan menghapus ujian <strong>{confirmHapus.mapel} — Kelas {confirmHapus.kelas}</strong> beserta seluruh soal dan hasil nilainya.
             </p>
-            <div style={{background:"var(--red3)", borderRadius:"var(--radius2)", padding:"12px", margin:"16px 0", fontSize:"13px", color:"var(--red2)", fontWeight:"600", textAlign:"center"}}>
-              ❌ Tindakan ini tidak bisa dibatalkan!
+            <div style={{background:"#fef3c7", borderRadius:"var(--radius2)", padding:"12px", margin:"16px 0", fontSize:"13px", color:"#92400e", fontWeight:"600", textAlign:"center"}}>
+              ♻️ Ujian akan dipindah ke Recycle Bin — bisa dipulihkan dalam 30 hari.
             </div>
             <div style={{display:"flex", gap:"8px"}}>
               <button className="btn btn-red" style={{flex:1, padding:"12px"}} onClick={() => handleHapus(confirmHapus)} disabled={saving}>
-                {saving ? "Menghapus..." : "🗑️ Ya, Hapus"}
+                {saving ? "Memindahkan..." : "🗑️ Pindah ke Recycle Bin"}
               </button>
               <button className="btn btn-ghost" style={{flex:1, padding:"12px"}} onClick={() => setConfirmHapus(null)}>Batal</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Recycle Bin */}
+      {showRecycleBin && (
+        <div className="modal-overlay" onClick={() => setShowRecycleBin(false)}>
+          <div className="modal" style={{maxWidth:"560px", maxHeight:"80vh", overflowY:"auto"}} onClick={e => e.stopPropagation()}>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px"}}>
+              <h2 style={{margin:0}}>♻️ Recycle Bin</h2>
+              <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => setShowRecycleBin(false)}>✕ Tutup</button>
+            </div>
+            <p style={{fontSize:"13px", color:"var(--gray)", marginBottom:"16px"}}>
+              Ujian yang dihapus tersimpan di sini. Pulihkan kapan saja, atau hapus permanen jika sudah tidak dibutuhkan.
+            </p>
+            {loadingBin ? (
+              <div style={{textAlign:"center", padding:"32px", color:"var(--gray)"}}>Memuat...</div>
+            ) : recycleBinList.length === 0 ? (
+              <div style={{textAlign:"center", padding:"32px", color:"var(--gray)"}}>
+                <div style={{fontSize:"40px", marginBottom:"8px"}}>🗑️</div>
+                <p>Recycle Bin kosong</p>
+              </div>
+            ) : recycleBinList.map(u => (
+              <div key={u.id} style={{border:"1px solid var(--border)", borderRadius:"var(--radius2)", padding:"14px", marginBottom:"10px", background:"#fafafa"}}>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{fontWeight:"700", fontSize:"14px"}}>{u.mapel} — Kelas {u.kelas}</div>
+                    <div style={{fontSize:"12px", color:"var(--gray)", marginTop:"2px"}}>
+                      {u.durasi} menit • Kode: {u.key}
+                    </div>
+                    <div style={{fontSize:"11px", color:"#ef4444", marginTop:"4px"}}>
+                      Dihapus: {new Date(u.deleted_at).toLocaleString("id-ID")}
+                    </div>
+                  </div>
+                  <div style={{display:"flex", gap:"6px", flexShrink:0}}>
+                    <button className="btn btn-green" style={{fontSize:"12px"}} onClick={() => handleRestore(u)}>🔄 Pulihkan</button>
+                    <button className="btn btn-red" style={{fontSize:"12px"}} onClick={() => handleHapusPermanent(u)}>❌ Hapus Permanen</button>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
