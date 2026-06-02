@@ -3989,7 +3989,7 @@ function ResultScreen({ result, onBack }) {
         <div className="result-stats">
           <div className="result-stat"><div className="val" style={{color:"var(--green2)"}}>{result.benar}</div><div className="lbl">Benar</div></div>
           <div className="result-stat"><div className="val" style={{color:"var(--red2)"}}>{result.total - result.benar}</div><div className="lbl">Salah</div></div>
-          <div className="result-stat"><div className="val">{result.total}</div><div className="lbl">Total Soal</div></di>
+          <div className="result-stat"><div className="val">{result.total}</div><div className="lbl">Total Soal</div></div>
         </div>
         <div style={{background: lulus ? "var(--green3)" : "var(--red3)", borderRadius:"var(--radius2)", padding:"12px", marginBottom:"20px", fontSize:"14px", color: lulus ? "var(--green2)" : "var(--red2)", fontWeight:"600"}}>
           {lulus ? `✅ Nilai Anda memenuhi KKM (${kkm})` : `❌ Nilai belum memenuhi KKM (${kkm}) — Perlu remedi`}
