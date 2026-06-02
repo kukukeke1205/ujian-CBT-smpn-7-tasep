@@ -1517,7 +1517,23 @@ function UjianPage({ ujianList, onRefresh }) {
     } catch(e) { alert("Gagal update: " + e.message); }
   };
 
+  const toggleKunci = async (ujian) => {
+    const newVal = !ujian.terkunci;
+    const aksi = newVal ? "kunci" : "buka kunci";
+    if (!window.confirm(`${newVal ? "🔒" : "🔓"} ${aksi.charAt(0).toUpperCase() + aksi.slice(1)} ujian "${ujian.mapel} — Kelas ${ujian.kelas}"?\n\n${newVal ? "Saat terkunci, soal & data ujian ini tidak bisa diedit untuk mencegah perubahan tidak sengaja." : "Ujian bisa diedit kembali setelah kunci dibuka."}`)) return;
+    try {
+      if (useDemo) {
+        const idx = DEMO_UJIAN.findIndex(u => u.id === ujian.id);
+        if (idx > -1) DEMO_UJIAN[idx].terkunci = newVal;
+      } else {
+        await supabase(`ujian?id=eq.${ujian.id}`, { method: "PATCH", body: JSON.stringify({ terkunci: newVal }) });
+      }
+      await onRefresh();
+    } catch(e) { alert("Gagal update: " + e.message); }
+  };
+
   const bukaFormEdit = (ujian) => {
+    if (ujian.terkunci) return alert("🔒 Ujian ini dikunci. Buka kunci dulu sebelum mengedit.");
     setEditUjian(ujian);
     setForm({ mapel: ujian.mapel, kelas: ujian.kelas, durasi: ujian.durasi, kkm: ujian.kkm || 75, jam_buka: ujian.jam_buka || "", jam_tutup: ujian.jam_tutup || "" });
     setShowForm(true);
@@ -1602,8 +1618,11 @@ function UjianPage({ ujianList, onRefresh }) {
             return (
               <div key={u.id} className="ujian-card">
                 <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"6px"}}>
-                  <h3 style={{margin:0}}>{u.mapel}</h3>
-                  <span className={`badge ${u.aktif ? "badge-green" : "badge-red"}`}>{u.aktif ? "Aktif" : "Nonaktif"}</span>
+                  <h3 style={{margin:0}}>{u.terkunci && <span title="Ujian terkunci">🔒 </span>}{u.mapel}</h3>
+                  <div style={{display:"flex", gap:"4px", flexWrap:"wrap", justifyContent:"flex-end"}}>
+                    {u.terkunci && <span className="badge" style={{background:"#fef3c7", color:"#92400e"}}>🔒 Terkunci</span>}
+                    <span className={`badge ${u.aktif ? "badge-green" : "badge-red"}`}>{u.aktif ? "Aktif" : "Nonaktif"}</span>
+                  </div>
                 </div>
                 <div className="meta">Kelas {u.kelas} • {u.durasi} menit • {(u.soal||[]).length} soal</div>
                 {u.jam_buka && <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"4px"}}>⏰ {u.jam_buka} – {u.jam_tutup||"∞"}</div>}
@@ -1611,11 +1630,14 @@ function UjianPage({ ujianList, onRefresh }) {
                 <div className="key-badge">{u.key}</div>
                 <div className="actions" style={{marginTop:"12px"}}>
                   <button className="btn btn-blue" onClick={() => setShowKey(u)}>🔑 Kode</button>
-                  <button className="btn btn-ghost" onClick={() => bukaFormEdit(u)}>✏️ Edit</button>
+                  <button className="btn btn-ghost" onClick={() => bukaFormEdit(u)} disabled={u.terkunci} style={{opacity: u.terkunci ? 0.4 : 1}} title={u.terkunci ? "Ujian terkunci — buka kunci dulu" : "Edit ujian"}>✏️ Edit</button>
+                  <button className="btn" style={{background: u.terkunci ? "#fef3c7" : "", color: u.terkunci ? "#92400e" : ""}} onClick={() => toggleKunci(u)} title={u.terkunci ? "Buka kunci ujian" : "Kunci ujian agar tidak bisa diedit"}>
+                    {u.terkunci ? "🔓 Buka" : "🔒 Kunci"}
+                  </button>
                   <button className={`btn ${u.aktif ? "btn-red" : "btn-green"}`} onClick={() => toggleAktif(u)}>
                     {u.aktif ? "⏸ Nonaktif" : "▶ Aktif"}
                   </button>
-                  <button className="btn btn-red" onClick={() => setConfirmHapus(u)}>🗑️ Hapus</button>
+                  <button className="btn btn-red" onClick={() => setConfirmHapus(u)} disabled={u.terkunci} style={{opacity: u.terkunci ? 0.4 : 1}} title={u.terkunci ? "Ujian terkunci — buka kunci dulu" : "Hapus ujian"}>🗑️ Hapus</button>
                 </div>
               </div>
             );
@@ -2334,12 +2356,20 @@ function SoalPage({ ujianList, onRefresh }) {
         <div className="form-field" style={{maxWidth:"360px"}}>
           <select value={selectedUjian} onChange={e => setSelectedUjian(e.target.value)}>
             <option value="">-- Pilih Ujian --</option>
-            {ujianList.map(u => <option key={u.id} value={u.id}>{u.mapel} - Kelas {u.kelas}</option>)}
+            {ujianList.map(u => <option key={u.id} value={u.id}>{u.terkunci ? "🔒 " : ""}{u.mapel} - Kelas {u.kelas}</option>)}
           </select>
         </div>
       </div>
 
-      {selectedUjian && (
+      {selectedUjian && ujianList.find(u => String(u.id) === selectedUjian)?.terkunci && (
+        <div className="card" style={{textAlign:"center", padding:"32px"}}>
+          <div style={{fontSize:"40px", marginBottom:"8px"}}>🔒</div>
+          <h2 style={{margin:"0 0 6px"}}>Ujian Terkunci</h2>
+          <p style={{color:"var(--gray)"}}>Soal pada ujian ini tidak bisa diedit karena sedang dikunci. Buka kunci di halaman <strong>Kelola Ujian</strong> terlebih dahulu.</p>
+        </div>
+      )}
+
+      {selectedUjian && !ujianList.find(u => String(u.id) === selectedUjian)?.terkunci && (
         <>
           {/* Tab pilih mode input */}
           <div className="card" style={{padding:"16px"}}>
