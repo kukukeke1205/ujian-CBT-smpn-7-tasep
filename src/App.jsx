@@ -3999,14 +3999,3 @@ function ResultScreen({ result, onBack }) {
     </div>
   );
 }
-"lbl">Salah</div></div>
-          <div className="result-stat"><div className="val">{result.total}</div><div className="lbl">Total Soal</div></div>
-        </div>
-        <div style={{background: lulus ? "var(--green3)" : "var(--red3)", borderRadius:"var(--radius2)", padding:"12px", marginBottom:"20px", fontSize:"14px", color: lulus ? "var(--green2)" : "var(--red2)", fontWeight:"600"}}>
-          {lulus ? `✅ Nilai Anda memenuhi KKM (${kkm})` : `❌ Nilai belum memenuhi KKM (${kkm}) — Perlu remedi`}
-        </div>
-        <button className="btn btn-blue" style={{width:"100%", padding:"12px"}} onClick={onBack}>🏠 Kembali ke Halaman Utama</button>
-      </div>
-    </div>
-  );
-}
