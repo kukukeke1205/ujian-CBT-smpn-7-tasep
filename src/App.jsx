@@ -1084,7 +1084,7 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
 
   const handleGuru = async () => {
     setError("");
-    const acc = GURU_ACCOUNTS.find(a => a.username === form.username && a.password === form.password);
+    const acc = GURU_ACCOUNTS.find(a => a.username === form.username.trim() && a.password === form.password.trim());
     if (!acc) return setError("Username atau password salah.");
     onGuruLogin(acc);
   };
@@ -1931,10 +1931,23 @@ function SoalPage({ ujianList, onRefresh }) {
   };
 
   const handleEdit = (s) => {
+    if (s.terkunci) return alert("🔒 Soal ini dikunci. Buka kunci dulu sebelum mengedit.");
     setEditSoal(s);
     setForm({ pertanyaan: s.pertanyaan, gambar: s.gambar || "", narasi: s.narasi || "", narasi_id: s.narasi_id || "", opsi: [...s.opsi], jawaban: s.jawaban });
     setUploadMode("manual");
     window.scrollTo(0, 400);
+  };
+
+  const handleToggleLock = async (s) => {
+    const aksi = s.terkunci ? "buka kunci" : "kunci";
+    if (!confirm(`${s.terkunci ? "🔓" : "🔒"} ${aksi.charAt(0).toUpperCase() + aksi.slice(1)} soal ini?`)) return;
+    const newVal = !s.terkunci;
+    try {
+      if (!useDemo) {
+        await supabase(`soal?id=eq.${s.id}`, { method: "PATCH", body: JSON.stringify({ terkunci: newVal }) });
+      }
+      setSoalList(prev => prev.map(q => q.id === s.id ? { ...q, terkunci: newVal } : q));
+    } catch(e) { alert("Gagal ubah kunci soal: " + e.message); }
   };
 
   const handleDelete = async (soalId) => {
@@ -2110,10 +2123,20 @@ function SoalPage({ ujianList, onRefresh }) {
       const opsiB = String(row[2] || "").trim();
       const opsiC = String(row[3] || "").trim();
       const opsiD = String(row[4] || "").trim();
-      const jwbRaw = String(row[5] || "").trim().toUpperCase();
+      // Ambil kolom F (jawaban). Support: "A", "a", "1", "2","3","4", atau teks opsi lengkap
+      const jwbRaw = String(row[5] || "").trim().toUpperCase().replace(/[^A-D0-9]/g,"");
       if (!pertanyaan || !opsiA) continue;
-      const jwbMap = { "A":0, "B":1, "C":2, "D":3 };
-      const jawaban = jwbMap[jwbRaw] ?? 0;
+      let jawaban = 0;
+      if (jwbRaw === "A" || jwbRaw === "1") jawaban = 0;
+      else if (jwbRaw === "B" || jwbRaw === "2") jawaban = 1;
+      else if (jwbRaw === "C" || jwbRaw === "3") jawaban = 2;
+      else if (jwbRaw === "D" || jwbRaw === "4") jawaban = 3;
+      // Fallback: cek apakah teks kolom F cocok salah satu opsi
+      else {
+        const jwbFull = String(row[5] || "").trim();
+        const idx = [opsiA, opsiB, opsiC, opsiD].findIndex(o => o.toLowerCase() === jwbFull.toLowerCase());
+        if (idx >= 0) jawaban = idx;
+      }
       hasil.push({ id: Date.now() + i, pertanyaan, opsi: [opsiA, opsiB, opsiC, opsiD], jawaban });
     }
     return hasil;
@@ -2145,7 +2168,8 @@ function SoalPage({ ujianList, onRefresh }) {
     //  - "opsi"    → baris opsi (mis. "A. ...", "B) ...", "- ..." setelah pertanyaan)
     //  - "pertanyaan" → baris pertanyaan baru
     //  - "lanjut"  → lanjutan teks pertanyaan/opsi sebelumnya
-    const POLA_KUNCI = /^(jawaban|kunci|jwb|answer|kunci\s*jawaban)\s*[:.\-]\s*([A-Da-d])\b/i;
+    // Support: "Jawaban: A", "Kunci: B", "Jwb: C", "Answer: D", "Jawaban = A", "Kunci Jawaban : B", "KUNCI : A"
+    const POLA_KUNCI = /^(?:jawaban|kunci(?:\s*jawaban)?|jwb|answer|kunci\s*:)\s*[:=.\-]\s*([A-Da-d1-4])\b/i;
     const POLA_OPSI_HURUF = /^([A-Da-d])\s*[\.\)]\s*(.+)$/; // "A. ..." / "A) ..."
     const POLA_PERTANYAAN_NOMOR = /^(\d+)\s*[\.\)]\s*(.+)$/; // "1. ..." / "1) ..."
     const POLA_BULLET = /^[-•▪●◦*]\s+(.+)$/; // "- ..." / "• ..."
@@ -2188,7 +2212,10 @@ function SoalPage({ ujianList, onRefresh }) {
       // Cek kunci jawaban dulu (paling spesifik)
       const matchKunci = line.match(POLA_KUNCI);
       if (matchKunci && current) {
-        current.jawaban = ["A","B","C","D"].indexOf(matchKunci[2].toUpperCase());
+        const kjRaw = matchKunci[1].toUpperCase();
+        // Support angka (1-4) dan huruf (A-D)
+        const kjIdx = {"A":0,"B":1,"C":2,"D":3,"1":0,"2":1,"3":2,"4":3}[kjRaw];
+        current.jawaban = kjIdx !== undefined ? kjIdx : 0;
         commitCurrent();
         continue;
       }
@@ -2660,10 +2687,15 @@ function SoalPage({ ujianList, onRefresh }) {
                 <div key={s.id} style={{border:`2px solid ${editSoal?.id === s.id ? "var(--yellow)" : "var(--border)"}`, borderRadius:"var(--radius2)", padding:"16px", marginBottom:"12px", background: editSoal?.id === s.id ? "var(--yellow3)" : "white"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
                     <div style={{flex:1}}>
-                      <div style={{fontSize:"12px", fontWeight:"700", color:"var(--blue)", marginBottom:"6px"}}>
+                      <div style={{fontSize:"12px", fontWeight:"700", color:"var(--blue)", marginBottom:"6px", display:"flex", alignItems:"center", gap:"6px", flexWrap:"wrap"}}>
                         SOAL {idx+1} {editSoal?.id === s.id ? "— ✏️ Sedang Diedit" : ""}
+                        {s.terkunci && (
+                          <span style={{fontSize:"10px", padding:"2px 8px", borderRadius:"99px", background:"#fef3c7", color:"#92400e", fontWeight:"700"}}>
+                            🔒 TERKUNCI
+                          </span>
+                        )}
                         {s.narasi_id && (
-                          <span style={{marginLeft:"8px", fontSize:"10px", padding:"2px 8px", borderRadius:"99px", background:"#dbeafe", color:"#1e40af", fontWeight:"700"}}>
+                          <span style={{fontSize:"10px", padding:"2px 8px", borderRadius:"99px", background:"#dbeafe", color:"#1e40af", fontWeight:"700"}}>
                             📖 NARASI
                           </span>
                         )}
@@ -2683,8 +2715,19 @@ function SoalPage({ ujianList, onRefresh }) {
                       </div>
                     </div>
                     <div style={{display:"flex", flexDirection:"column", gap:"6px", marginLeft:"12px"}}>
-                      <button className="btn btn-ghost" style={{fontSize:"12px"}} onClick={() => handleEdit(s)}>✏️ Edit</button>
-                      <button className="btn btn-red" style={{fontSize:"12px"}} onClick={() => handleDelete(s.id)}>🗑️</button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{fontSize:"12px", opacity: s.terkunci ? 0.4 : 1}}
+                        onClick={() => handleEdit(s)}
+                        title={s.terkunci ? "Soal terkunci — buka kunci dulu" : "Edit soal"}
+                      >✏️ Edit</button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{fontSize:"12px", background: s.terkunci ? "#fef3c7" : "", color: s.terkunci ? "#92400e" : ""}}
+                        onClick={() => handleToggleLock(s)}
+                        title={s.terkunci ? "Buka kunci soal" : "Kunci soal agar tidak bisa diedit"}
+                      >{s.terkunci ? "🔓" : "🔒"}</button>
+                      <button className="btn btn-red" style={{fontSize:"12px", opacity: s.terkunci ? 0.4 : 1}} onClick={() => { if(s.terkunci) return alert("🔒 Soal terkunci. Buka kunci dulu."); handleDelete(s.id); }}>🗑️</button>
                     </div>
                   </div>
                 </div>
@@ -3774,7 +3817,12 @@ function StudentExam({ data, onFinish }) {
 
           <div style={{display:"flex", gap:"12px"}}>
             <button className="btn btn-ghost" style={{flex:1, padding:"14px"}} onClick={() => setShowReview(false)}>← Kembali ke Soal</button>
-            <button className="btn btn-green" style={{flex:1, padding:"14px", fontSize:"15px", fontWeight:"700"}} onClick={() => setShowConfirm(true)}>
+            <button className="btn btn-green" style={{flex:1, padding:"14px", fontSize:"15px", fontWeight:"700"}} onClick={() => {
+              const pesan = belumDijawab > 0
+                ? `Masih ada ${belumDijawab} soal belum dijawab — akan dianggap salah.\nYakin kumpulkan?`
+                : `Semua ${soal.length} soal sudah dijawab.\nYakin kumpulkan ujian?`;
+              if (window.confirm(pesan)) handleSubmit(false);
+            }}>
               ✅ Kumpulkan Ujian
             </button>
           </div>
@@ -3899,7 +3947,7 @@ function StudentExam({ data, onFinish }) {
             </div>
           </div>
           <button className="btn btn-green" style={{width:"100%", marginBottom:"8px"}} onClick={() => setShowReview(true)} disabled={locked}>📋 Review Jawaban</button>
-          <button className="btn btn-ghost" style={{width:"100%", fontSize:"12px"}} onClick={() => setShowConfirm(true)} disabled={locked}>Langsung Kumpulkan</button>
+          <button style={{width:"100%", fontSize:"12px", fontWeight:"700", padding:"8px 12px", borderRadius:"var(--radius2)", border:"none", cursor: locked ? "not-allowed" : "pointer", background: locked ? "#e2e8f0" : "#f59e0b", color: locked ? "var(--gray)" : "white", transition:"background .2s"}} onClick={() => { if(!locked) setShowConfirm(true); }} disabled={locked} onMouseOver={e => { if(!locked) e.currentTarget.style.background="#d97706"; }} onMouseOut={e => { if(!locked) e.currentTarget.style.background="#f59e0b"; }}>⚡ Langsung Kumpulkan</button>
         </div>
       </div>
 
@@ -3941,6 +3989,17 @@ function ResultScreen({ result, onBack }) {
         <div className="result-stats">
           <div className="result-stat"><div className="val" style={{color:"var(--green2)"}}>{result.benar}</div><div className="lbl">Benar</div></div>
           <div className="result-stat"><div className="val" style={{color:"var(--red2)"}}>{result.total - result.benar}</div><div className="lbl">Salah</div></div>
+          <div className="result-stat"><div className="val">{result.total}</div><div className="lbl">Total Soal</div></div>
+        </div>
+        <div style={{background: lulus ? "var(--green3)" : "var(--red3)", borderRadius:"var(--radius2)", padding:"12px", marginBottom:"20px", fontSize:"14px", color: lulus ? "var(--green2)" : "var(--red2)", fontWeight:"600"}}>
+          {lulus ? `✅ Nilai Anda memenuhi KKM (${kkm})` : `❌ Nilai belum memenuhi KKM (${kkm}) — Perlu remedi`}
+        </div>
+        <button className="btn btn-blue" style={{width:"100%", padding:"12px"}} onClick={onBack}>🏠 Kembali ke Halaman Utama</button>
+      </div>
+    </div>
+  );
+}
+"lbl">Salah</div></div>
           <div className="result-stat"><div className="val">{result.total}</div><div className="lbl">Total Soal</div></div>
         </div>
         <div style={{background: lulus ? "var(--green3)" : "var(--red3)", borderRadius:"var(--radius2)", padding:"12px", marginBottom:"20px", fontSize:"14px", color: lulus ? "var(--green2)" : "var(--red2)", fontWeight:"600"}}>
