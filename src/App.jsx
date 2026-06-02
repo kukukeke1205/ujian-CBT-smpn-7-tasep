@@ -3091,31 +3091,139 @@ function BukaKunciManual({ onBukaKunci }) {
 
 // ---- Hasil Ujian ----
 function HasilPage({ hasilList, ujianList }) {
-  const [filter, setFilter] = useState("");
+  const [filterMapel, setFilterMapel] = useState("");
+  const [filterKelas, setFilterKelas] = useState("");
   const [tabView, setTabView] = useState("semua"); // semua | curiga
-  // Helper: ambil KKM dari ujian terkait hasil. Default 75 kalau tidak ketemu.
+
   const kkmHasil = (h) => {
     const u = ujianList.find(uj => uj.id === h.ujian_id);
     return u && u.kkm ? u.kkm : 75;
   };
+
+  // Kumpulkan semua kelas unik dari data hasil
+  const kelasUnik = [...new Set(hasilList.map(h => h.kelas))].sort();
+
   const filtered = hasilList.filter(h => {
-    const matchMapel = filter ? h.mapel === filter : true;
+    const matchMapel = filterMapel ? h.mapel === filterMapel : true;
+    const matchKelas = filterKelas ? h.kelas === filterKelas : true;
     const matchTab = tabView === "curiga" ? h.mencurigakan : true;
-    return matchMapel && matchTab;
+    return matchMapel && matchKelas && matchTab;
   });
   const curigaCount = hasilList.filter(h => h.mencurigakan).length;
 
+  const labelFilter = () => {
+    const parts = [];
+    if (filterMapel) parts.push(filterMapel);
+    if (filterKelas) parts.push(`Kelas ${filterKelas}`);
+    return parts.length ? parts.join(" — ") : "semua";
+  };
+
+  // ── Export CSV (semicolon agar Excel langsung multi-kolom) ──
   const exportCSV = () => {
+    const bom = "﻿"; // BOM agar Excel deteksi UTF-8 dengan benar
     const rows = [
       ["No","Nama","Kelas","Mata Pelajaran","Benar","Total","Nilai","Status","Pelanggaran","Mencurigakan"],
-      ...filtered.map((h,i) => [i+1, h.nama_siswa, h.kelas, h.mapel, h.benar, h.total, h.nilai, h.nilai>=kkmHasil(h)?"Lulus":"Remedi", h.pelanggaran||0, h.mencurigakan?"Ya":"Tidak"])
+      ...filtered.map((h,i) => [
+        i+1, h.nama_siswa, h.kelas, h.mapel,
+        h.benar, h.total, h.nilai,
+        h.nilai >= kkmHasil(h) ? "Lulus" : "Remedi",
+        h.pelanggaran||0,
+        h.mencurigakan ? "Ya" : "Tidak"
+      ])
     ];
-    const csv = rows.map(r => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const csv = bom + rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(";")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `hasil-ujian-${filter||"semua"}.csv`; a.click();
+    a.href = url; a.download = `hasil-ujian-${labelFilter()}.csv`; a.click();
     URL.revokeObjectURL(url);
+  };
+
+  // ── Export Excel (.xlsx) pakai SheetJS ──
+  const exportExcel = () => {
+    const loadXLSX = () => new Promise((resolve, reject) => {
+      if (window.XLSX) return resolve(window.XLSX);
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      s.onload = () => resolve(window.XLSX);
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+
+    loadXLSX().then(XLSX => {
+      const rows = [
+        ["No","Nama","Kelas","Mata Pelajaran","Benar","Total","Nilai","Status","Pelanggaran","Mencurigakan"],
+        ...filtered.map((h,i) => [
+          i+1, h.nama_siswa, h.kelas, h.mapel,
+          h.benar, h.total, h.nilai,
+          h.nilai >= kkmHasil(h) ? "Lulus" : "Remedi",
+          h.pelanggaran||0,
+          h.mencurigakan ? "Ya" : "Tidak"
+        ])
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      // Lebar kolom otomatis
+      ws["!cols"] = [4,24,10,20,8,8,8,10,12,14].map(w => ({ wch: w }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Hasil Ujian");
+      XLSX.writeFile(wb, `hasil-ujian-${labelFilter()}.xlsx`);
+    }).catch(() => alert("Gagal memuat library Excel. Cek koneksi internet."));
+  };
+
+  // ── Print / PDF per kelas ──
+  const handlePrint = () => {
+    const kkm = (h) => {
+      const u = ujianList.find(uj => uj.id === h.ujian_id);
+      return u && u.kkm ? u.kkm : 75;
+    };
+    const rows = filtered.map((h, i) => `
+      <tr style="background:${h.mencurigakan ? "#fff5f5" : i%2===0 ? "#f8fafc" : "white"}">
+        <td>${i+1}</td>
+        <td>${h.nama_siswa}${h.mencurigakan ? " ⚠️" : ""}</td>
+        <td>${h.kelas}</td>
+        <td>${h.mapel}</td>
+        <td style="text-align:center">${h.benar}/${h.total}</td>
+        <td style="text-align:center;font-weight:700;color:${h.nilai >= kkm(h) ? "#16a34a" : "#dc2626"}">${h.nilai}</td>
+        <td style="text-align:center"><span style="padding:2px 10px;border-radius:99px;font-size:11px;font-weight:700;background:${h.nilai >= kkm(h) ? "#dcfce7" : "#fee2e2"};color:${h.nilai >= kkm(h) ? "#166534" : "#991b1b"}">${h.nilai >= kkm(h) ? "Lulus" : "Remedi"}</span></td>
+        <td style="text-align:center">${(h.pelanggaran||0) === 0 ? "✅" : `⚠️ ${h.pelanggaran}x`}</td>
+      </tr>`).join("");
+
+    const lulus = filtered.filter(h => h.nilai >= kkm(h)).length;
+    const remedi = filtered.length - lulus;
+    const rataRata = filtered.length ? Math.round(filtered.reduce((s,h) => s + h.nilai, 0) / filtered.length) : 0;
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Hasil Ujian</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 24px; color: #0f172a; }
+      h1 { font-size: 18px; margin-bottom: 4px; }
+      .sub { font-size: 13px; color: #64748b; margin-bottom: 16px; }
+      .stats { display: flex; gap: 16px; margin-bottom: 16px; }
+      .stat { background: #f1f5f9; border-radius: 8px; padding: 10px 18px; text-align: center; }
+      .stat .val { font-size: 22px; font-weight: 700; }
+      .stat .lbl { font-size: 11px; color: #64748b; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th { background: #1e293b; color: white; padding: 8px 10px; text-align: left; }
+      td { padding: 7px 10px; border-bottom: 1px solid #e2e8f0; }
+      @media print { body { padding: 12px; } }
+    </style></head><body>
+    <h1>Rekap Nilai Ujian</h1>
+    <div class="sub">${labelFilter() !== "semua" ? labelFilter() : "Semua Mata Pelajaran & Kelas"} • Dicetak: ${new Date().toLocaleString("id-ID")}</div>
+    <div class="stats">
+      <div class="stat"><div class="val">${filtered.length}</div><div class="lbl">Peserta</div></div>
+      <div class="stat"><div class="val" style="color:#16a34a">${lulus}</div><div class="lbl">Lulus</div></div>
+      <div class="stat"><div class="val" style="color:#dc2626">${remedi}</div><div class="lbl">Remedi</div></div>
+      <div class="stat"><div class="val">${rataRata}</div><div class="lbl">Rata-rata</div></div>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>Nama</th><th>Kelas</th><th>Mata Pelajaran</th><th>Benar/Total</th><th>Nilai</th><th>Status</th><th>Pelanggaran</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </body></html>`;
+
+    const win = window.open("", "_blank");
+    win.document.write(html);
+    win.document.close();
+    win.onload = () => setTimeout(() => win.print(), 400);
   };
 
   return (
@@ -3134,19 +3242,35 @@ function HasilPage({ hasilList, ujianList }) {
       )}
 
       <div className="card">
-        <div className="card-header">
-          <div style={{display:"flex", gap:"8px"}}>
+        <div className="card-header" style={{flexWrap:"wrap", gap:"8px"}}>
+          <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
             <button className={`btn ${tabView==="semua"?"btn-blue":"btn-ghost"}`} onClick={() => setTabView("semua")}>📊 Semua ({hasilList.length})</button>
             <button className={`btn ${tabView==="curiga"?"btn-red":"btn-ghost"}`} onClick={() => setTabView("curiga")}>🚨 Mencurigakan ({curigaCount})</button>
           </div>
-          <div style={{display:"flex", gap:"8px"}}>
-            <select value={filter} onChange={e => setFilter(e.target.value)} style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}}>
+          <div style={{display:"flex", gap:"8px", flexWrap:"wrap", alignItems:"center"}}>
+            {/* Filter Mata Pelajaran */}
+            <select value={filterMapel} onChange={e => setFilterMapel(e.target.value)} style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}}>
               <option value="">Semua Mapel</option>
               {MAPEL.map(m => <option key={m}>{m}</option>)}
             </select>
-            <button className="btn btn-green" onClick={exportCSV}>⬇️ Export CSV</button>
+            {/* Filter Kelas */}
+            <select value={filterKelas} onChange={e => setFilterKelas(e.target.value)} style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}}>
+              <option value="">Semua Kelas</option>
+              {kelasUnik.map(k => <option key={k} value={k}>Kelas {k}</option>)}
+            </select>
+            {/* Tombol Export */}
+            <button className="btn btn-green" onClick={exportExcel} title="Download Excel (.xlsx) multi-kolom">📊 Excel</button>
+            <button className="btn btn-ghost" onClick={exportCSV} title="Download CSV">⬇️ CSV</button>
+            <button className="btn btn-ghost" onClick={handlePrint} title="Print atau simpan PDF per kelas">🖨️ Print/PDF</button>
           </div>
         </div>
+
+        {(filterMapel || filterKelas) && (
+          <div style={{padding:"8px 16px", background:"#eff6ff", borderBottom:"1px solid #bfdbfe", fontSize:"13px", color:"#1e40af", display:"flex", alignItems:"center", gap:"8px"}}>
+            <span>🔍 Filter: <strong>{labelFilter()}</strong> — {filtered.length} data</span>
+            <button onClick={() => { setFilterMapel(""); setFilterKelas(""); }} style={{background:"none", border:"none", color:"#3b82f6", cursor:"pointer", fontSize:"12px", fontWeight:"700"}}>✕ Reset</button>
+          </div>
+        )}
 
         {filtered.length === 0 ? (
           <div className="empty-state"><div className="icon">📊</div><p>{tabView==="curiga" ? "Tidak ada siswa mencurigakan 🎉" : "Belum ada data hasil ujian"}</p></div>
