@@ -1082,6 +1082,29 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
   const [loading, setLoading] = useState(false);
   const [showPass, setShowPass] = useState(false);
 
+  // ── Roster siswa (opsional): kalau ada, nama dipilih dari daftar & kelas otomatis ──
+  const [siswaList, setSiswaList] = useState([]);
+  useEffect(() => {
+    if (useDemo) return;
+    (async () => {
+      try { const d = await supabase("siswa?order=nama.asc"); setSiswaList(Array.isArray(d) ? d : []); }
+      catch { setSiswaList([]); }
+    })();
+  }, []);
+  // Cocokkan nama yang diketik dengan roster (case-insensitive). Hanya cocok jika tepat satu.
+  const rosterMatch = (() => {
+    const nm = (form.nama || "").trim().toLowerCase();
+    if (!nm || siswaList.length === 0) return null;
+    const m = siswaList.filter(s => (s.nama || "").trim().toLowerCase() === nm);
+    return m.length === 1 ? m[0] : null;
+  })();
+  // Kalau cocok, isi kelas otomatis dari roster
+  useEffect(() => {
+    if (rosterMatch && form.kelas !== rosterMatch.kelas) {
+      setForm(p => ({ ...p, kelas: rosterMatch.kelas }));
+    }
+  }, [rosterMatch]);
+
   const handleGuru = async () => {
     setError("");
     const acc = GURU_ACCOUNTS.find(a => a.username === form.username.trim() && a.password === form.password.trim());
@@ -1155,28 +1178,46 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
         {error && <div className="error-msg">⚠️ {error}</div>}
         {tab === "siswa" ? (
           <>
-            <div className="field"><label>Nama Lengkap</label><input placeholder="Nama lengkap Anda" value={form.nama} onChange={e => setForm(p => ({...p, nama: e.target.value}))} /></div>
             <div className="field">
-              <label>Kelas</label>
-              <select value={form.kelas} onChange={e => setForm(p => ({...p, kelas: e.target.value}))}>
-                <option value="">-- Pilih Kelas --</option>
-                <optgroup label="Kelas VII">
-                  <option value="VII-1">VII-1</option>
-                  <option value="VII-2">VII-2</option>
-                  <option value="VII-3">VII-3</option>
-                </optgroup>
-                <optgroup label="Kelas VIII">
-                  <option value="VIII-1">VIII-1</option>
-                  <option value="VIII-2">VIII-2</option>
-                  <option value="VIII-3">VIII-3</option>
-                </optgroup>
-                <optgroup label="Kelas IX">
-                  <option value="IX-1">IX-1</option>
-                  <option value="IX-2">IX-2</option>
-                  <option value="IX-3">IX-3</option>
-                </optgroup>
-              </select>
+              <label>Nama Lengkap</label>
+              <input list="rosterNama" placeholder={siswaList.length ? "Ketik / pilih nama Anda" : "Nama lengkap Anda"} value={form.nama} onChange={e => setForm(p => ({...p, nama: e.target.value}))} autoComplete="off" />
+              {siswaList.length > 0 && (
+                <datalist id="rosterNama">
+                  {siswaList.map(s => <option key={s.id} value={s.nama}>{s.kelas}</option>)}
+                </datalist>
+              )}
             </div>
+            {rosterMatch ? (
+              <div className="field">
+                <label>Kelas</label>
+                <div style={{display:"flex",alignItems:"center",gap:"8px",padding:"10px 12px",borderRadius:"var(--radius2)",background:"rgba(34,197,94,0.12)",color:"#16a34a",fontWeight:"700",fontSize:"14px"}}>
+                  ✅ {rosterMatch.kelas} <span style={{fontWeight:"500",fontSize:"12px",opacity:0.8}}>(terisi otomatis dari data sekolah)</span>
+                </div>
+              </div>
+            ) : (
+              <div className="field">
+                <label>Kelas</label>
+                <select value={form.kelas} onChange={e => setForm(p => ({...p, kelas: e.target.value}))}>
+                  <option value="">-- Pilih Kelas --</option>
+                  <optgroup label="Kelas VII">
+                    <option value="VII-1">VII-1</option>
+                    <option value="VII-2">VII-2</option>
+                    <option value="VII-3">VII-3</option>
+                  </optgroup>
+                  <optgroup label="Kelas VIII">
+                    <option value="VIII-1">VIII-1</option>
+                    <option value="VIII-2">VIII-2</option>
+                    <option value="VIII-3">VIII-3</option>
+                  </optgroup>
+                  <optgroup label="Kelas IX">
+                    <option value="IX-1">IX-1</option>
+                    <option value="IX-2">IX-2</option>
+                    <option value="IX-3">IX-3</option>
+                  </optgroup>
+                </select>
+                {siswaList.length > 0 && <div style={{fontSize:"11px",color:"rgba(255,255,255,0.45)",marginTop:"4px"}}>Nama tidak ditemukan di daftar — pilih kelas manual.</div>}
+              </div>
+            )}
             <div className="field"><label>Kode Ujian</label><input placeholder="Masukkan kode dari guru" value={form.examKey} onChange={e => setForm(p => ({...p, examKey: e.target.value.toUpperCase()}))} style={{letterSpacing:"3px", fontFamily:"var(--mono)", fontWeight:"700"}} /></div>
             <button className="btn-primary" onClick={handleSiswa} disabled={loading}>{loading ? "Memuat..." : "🚀 Mulai Ujian"}</button>
             {useDemo && <p style={{color:"rgba(255,255,255,0.4)", fontSize:"12px", textAlign:"center", marginTop:"12px"}}>Demo: gunakan kode <strong style={{color:"#93c5fd"}}>MTK001</strong></p>}
@@ -1217,6 +1258,7 @@ function GuruDashboard({ guru, onLogout }) {
   const [page, setPage] = useState("dashboard");
   const [ujianList, setUjianList] = useState([]);
   const [hasilList, setHasilList] = useState([]);
+  const [siswaList, setSiswaList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -1234,11 +1276,13 @@ function GuruDashboard({ guru, onLogout }) {
         setHasilList([...DEMO_HASIL]);
       } else {
         // Load ujian, soal, dan hasil sekaligus
-        const [ujianRaw, soalRaw, hasilRaw] = await Promise.all([
+        const [ujianRaw, soalRaw, hasilRaw, siswaRaw] = await Promise.all([
           supabase("ujian?deleted_at=is.null&order=id.desc"),
           supabase("soal?order=ujian_id.asc,id.asc"),
           supabase("hasil?order=id.desc"),
+          supabase("siswa?order=kelas.asc,nama.asc").catch(() => []),
         ]);
+        setSiswaList(Array.isArray(siswaRaw) ? siswaRaw : []);
         // Gabungkan soal ke masing-masing ujian
         const ujianDenganSoal = ujianRaw.map(u => ({
           ...u,
@@ -1262,6 +1306,7 @@ function GuruDashboard({ guru, onLogout }) {
     { id: "dashboard", icon: "📊", label: "Dashboard" },
     { id: "ujian", icon: "📋", label: "Kelola Ujian" },
     { id: "soal", icon: "✏️", label: "Buat Soal" },
+    { id: "siswa", icon: "🧑‍🎓", label: "Daftar Siswa" },
     { id: "monitor", icon: "🖥️", label: "Monitor Ujian" },
     { id: "hasil", icon: "📈", label: "Hasil Ujian" },
   ];
@@ -1311,6 +1356,7 @@ function GuruDashboard({ guru, onLogout }) {
             {page === "dashboard" && <DashboardPage ujianList={ujianList} hasilList={hasilList} />}
             {page === "ujian" && <UjianPage ujianList={ujianList} onRefresh={loadData} />}
             {page === "soal" && <SoalPage ujianList={ujianList} onRefresh={loadData} />}
+            {page === "siswa" && <SiswaPage siswaList={siswaList} onRefresh={loadData} />}
             {page === "monitor" && <MonitorPage ujianList={ujianList} />}
             {page === "hasil" && <HasilPage hasilList={hasilList} ujianList={ujianList} />}
           </>
@@ -1575,9 +1621,14 @@ function UjianPage({ ujianList, onRefresh }) {
                 </select>
               </div>
               <div className="form-field">
-                <label>Kelas</label>
+                <label>Tingkat / Target</label>
                 <select value={form.kelas} onChange={e => setForm(p=>({...p, kelas: e.target.value}))}>
-                  <option value="">-- Pilih Kelas --</option>
+                  <option value="">-- Pilih Tingkat --</option>
+                  <optgroup label="Satu angkatan (dikumpulkan per kode)">
+                    <option value="VII">VII (semua kelas)</option>
+                    <option value="VIII">VIII (semua kelas)</option>
+                    <option value="IX">IX (semua kelas)</option>
+                  </optgroup>
                   <optgroup label="Kelas VII">
                     <option value="VII-1">VII-1</option>
                     <option value="VII-2">VII-2</option>
@@ -1594,6 +1645,7 @@ function UjianPage({ ujianList, onRefresh }) {
                     <option value="IX-3">IX-3</option>
                   </optgroup>
                 </select>
+                <div style={{fontSize:"11px", color:"var(--gray)", marginTop:"4px"}}>💡 Untuk satu ujian per angkatan, pilih "semua kelas" — siswa dari kelas mana pun cukup pakai kode yang sama.</div>
               </div>
               <div className="form-field"><label>Durasi (menit)</label><input type="number" value={form.durasi} onChange={e => setForm(p=>({...p, durasi:e.target.value}))} /></div>
               <div className="form-field"><label>KKM (Nilai Minimal Lulus)</label><input type="number" min="0" max="100" value={form.kkm} onChange={e => setForm(p=>({...p, kkm:e.target.value}))} placeholder="75" /></div>
@@ -1624,7 +1676,7 @@ function UjianPage({ ujianList, onRefresh }) {
                     <span className={`badge ${u.aktif ? "badge-green" : "badge-red"}`}>{u.aktif ? "Aktif" : "Nonaktif"}</span>
                   </div>
                 </div>
-                <div className="meta">Kelas {u.kelas} • {u.durasi} menit • {(u.soal||[]).length} soal</div>
+                <div className="meta">Tingkat {u.kelas} • {u.durasi} menit • {(u.soal||[]).length} soal</div>
                 {u.jam_buka && <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"4px"}}>⏰ {u.jam_buka} – {u.jam_tutup||"∞"}</div>}
                 {jadwal && <span className={`badge ${jadwal.color}`} style={{marginBottom:"8px", display:"inline-block"}}>{jadwal.label}</span>}
                 <div className="key-badge">{u.key}</div>
@@ -1654,7 +1706,7 @@ function UjianPage({ ujianList, onRefresh }) {
             <p>Bagikan kode ini kepada siswa untuk ujian {showKey.mapel}</p>
             <div className="exam-key-display">
               <div className="key">{showKey.key}</div>
-              <p>Kelas {showKey.kelas} • {showKey.durasi} menit</p>
+              <p>Tingkat {showKey.kelas} • {showKey.durasi} menit</p>
             </div>
             <button className="btn btn-blue" style={{width:"100%"}} onClick={() => { navigator.clipboard?.writeText(showKey.key); alert("Kode disalin!"); }}>📋 Salin Kode</button>
             <div style={{height:"8px"}}/>
@@ -3405,15 +3457,186 @@ function HasilPage({ hasilList, ujianList }) {
 }
 
 // ============================================================
+// DAFTAR SISWA (ROSTER)
+// ============================================================
+const KELAS_OPSI = ["VII-1","VII-2","VII-3","VIII-1","VIII-2","VIII-3","IX-1","IX-2","IX-3"];
+
+function SiswaPage({ siswaList, onRefresh }) {
+  const [form, setForm] = useState({ nama: "", kelas: "" });
+  const [bulkText, setBulkText] = useState("");
+  const [bulkKelas, setBulkKelas] = useState("");
+  const [search, setSearch] = useState("");
+  const [filterKelas, setFilterKelas] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState("");
+  const [showBulk, setShowBulk] = useState(false);
+
+  const tambahSatu = async () => {
+    if (!form.nama.trim()) return alert("Nama tidak boleh kosong.");
+    if (!form.kelas) return alert("Pilih kelas dulu.");
+    if (useDemo) return alert("Mode demo: daftar siswa tidak tersimpan.");
+    setSaving(true);
+    try {
+      await supabase("siswa", { method: "POST", body: JSON.stringify({ nama: form.nama.trim(), kelas: form.kelas }) });
+      setForm({ nama: "", kelas: form.kelas });
+      setStatus("✅ Siswa ditambahkan.");
+      await onRefresh();
+    } catch(e) { alert("Gagal menambah: " + e.message); }
+    setSaving(false);
+  };
+
+  // Impor massal: tiap baris "Nama" (pakai kelas terpilih) ATAU "Nama, Kelas" / "Nama [tab] Kelas"
+  const imporMassal = async () => {
+    if (useDemo) return alert("Mode demo: daftar siswa tidak tersimpan.");
+    const baris = bulkText.split(/\r?\n/).map(b => b.trim()).filter(Boolean);
+    if (baris.length === 0) return alert("Tempel daftar nama dulu.");
+    const records = [];
+    for (const b of baris) {
+      const part = b.split(/\t|,|;/).map(x => x.trim()).filter(Boolean);
+      let nama, kelas;
+      if (part.length >= 2) { nama = part[0]; kelas = part[1].toUpperCase().replace(/\s+/g,""); }
+      else { nama = part[0]; kelas = bulkKelas; }
+      if (!nama || !kelas) continue;
+      // lewati kalau sudah ada (nama+kelas sama)
+      const dup = siswaList.some(s => (s.nama||"").trim().toLowerCase() === nama.toLowerCase() && s.kelas === kelas);
+      if (dup) continue;
+      records.push({ nama, kelas });
+    }
+    if (records.length === 0) return alert("Tidak ada data baru yang valid (mungkin semua sudah terdaftar, atau kelas belum ditentukan).");
+    setSaving(true);
+    try {
+      await supabase("siswa", { method: "POST", body: JSON.stringify(records) });
+      setStatus(`✅ ${records.length} siswa diimpor.`);
+      setBulkText("");
+      await onRefresh();
+    } catch(e) { alert("Gagal impor: " + e.message); }
+    setSaving(false);
+  };
+
+  const hapusSatu = async (s) => {
+    if (useDemo) return alert("Mode demo: tidak tersimpan.");
+    if (!window.confirm(`Hapus ${s.nama} (${s.kelas}) dari daftar?`)) return;
+    try {
+      await supabase(`siswa?id=eq.${s.id}`, { method: "DELETE" });
+      await onRefresh();
+    } catch(e) { alert("Gagal menghapus: " + e.message); }
+  };
+
+  const filtered = siswaList.filter(s =>
+    (!filterKelas || s.kelas === filterKelas) &&
+    (!search || (s.nama||"").toLowerCase().includes(search.toLowerCase()))
+  );
+  // hitung per kelas
+  const perKelas = {};
+  siswaList.forEach(s => { perKelas[s.kelas] = (perKelas[s.kelas] || 0) + 1; });
+
+  return (
+    <>
+      <div className="page-header"><h1>Daftar Siswa</h1><p>Data ini opsional. Jika diisi, siswa cukup pilih namanya saat ujian dan kelas terisi otomatis.</p></div>
+
+      <div className="card">
+        <div className="card-header"><h2>➕ Tambah Siswa</h2></div>
+        <div style={{display:"flex", gap:"8px", flexWrap:"wrap", alignItems:"flex-end"}}>
+          <div className="form-field" style={{flex:"1 1 220px"}}>
+            <label>Nama</label>
+            <input value={form.nama} onChange={e => setForm(p=>({...p, nama:e.target.value}))} placeholder="Nama lengkap siswa" onKeyDown={e=>{if(e.key==='Enter')tambahSatu();}} />
+          </div>
+          <div className="form-field" style={{flex:"0 1 140px"}}>
+            <label>Kelas</label>
+            <select value={form.kelas} onChange={e => setForm(p=>({...p, kelas:e.target.value}))}>
+              <option value="">-- Kelas --</option>
+              {KELAS_OPSI.map(k => <option key={k} value={k}>{k}</option>)}
+            </select>
+          </div>
+          <button className="btn btn-green" onClick={tambahSatu} disabled={saving} style={{padding:"10px 18px"}}>Tambah</button>
+          <button className="btn btn-ghost" onClick={() => setShowBulk(v=>!v)} style={{padding:"10px 18px"}}>{showBulk ? "Tutup impor massal" : "📋 Impor Massal"}</button>
+        </div>
+        {status && <div style={{marginTop:"8px", fontSize:"13px", color:"var(--green2)", fontWeight:"600"}}>{status}</div>}
+
+        {showBulk && (
+          <div style={{marginTop:"16px", paddingTop:"16px", borderTop:"1px solid var(--border)"}}>
+            <label style={{fontSize:"13px", fontWeight:"700", display:"block", marginBottom:"6px"}}>Tempel daftar nama (satu nama per baris)</label>
+            <div style={{fontSize:"12px", color:"var(--gray)", marginBottom:"8px"}}>
+              Bisa salin langsung dari Excel. Format: <strong>satu nama per baris</strong> (pakai kelas di bawah), atau <strong>Nama, Kelas</strong> per baris (boleh dipisah koma/tab).
+            </div>
+            <div style={{display:"flex", gap:"8px", alignItems:"center", marginBottom:"8px", flexWrap:"wrap"}}>
+              <label style={{fontSize:"13px"}}>Kelas untuk baris tanpa kelas:</label>
+              <select value={bulkKelas} onChange={e => setBulkKelas(e.target.value)} style={{padding:"6px 10px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)"}}>
+                <option value="">-- Pilih --</option>
+                {KELAS_OPSI.map(k => <option key={k} value={k}>{k}</option>)}
+              </select>
+            </div>
+            <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={8} placeholder={"Budi Santoso\nSiti Aminah\natau:\nBudi Santoso, VIII-2\nSiti Aminah, VIII-2"} style={{width:"100%", padding:"10px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontFamily:"inherit", fontSize:"14px"}} />
+            <button className="btn btn-blue" onClick={imporMassal} disabled={saving} style={{marginTop:"8px"}}>{saving ? "Mengimpor..." : "Impor ke Daftar"}</button>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-header" style={{display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:"8px"}}>
+          <h2>Daftar Siswa ({siswaList.length})</h2>
+          <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Cari nama..." style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}} />
+            <select value={filterKelas} onChange={e => setFilterKelas(e.target.value)} style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}}>
+              <option value="">Semua kelas</option>
+              {KELAS_OPSI.map(k => <option key={k} value={k}>{k} ({perKelas[k]||0})</option>)}
+            </select>
+          </div>
+        </div>
+        {siswaList.length === 0 ? (
+          <div className="empty-state"><div className="icon">🧑‍🎓</div><p>Belum ada siswa. Tambahkan di atas, atau biarkan kosong — siswa tetap bisa pilih kelas manual saat ujian.</p></div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>#</th><th>Nama</th><th>Kelas</th><th></th></tr></thead>
+              <tbody>
+                {filtered.map((s,i) => (
+                  <tr key={s.id}>
+                    <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
+                    <td>{s.nama}</td>
+                    <td><span className="badge badge-blue">{s.kelas}</span></td>
+                    <td style={{textAlign:"right"}}><button className="btn btn-red" style={{fontSize:"12px", padding:"4px 10px"}} onClick={() => hapusSatu(s)}>🗑️</button></td>
+                  </tr>
+                ))}
+                {filtered.length === 0 && <tr><td colSpan={4} style={{textAlign:"center", color:"var(--gray)", padding:"16px"}}>Tidak ada yang cocok.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ============================================================
 // STUDENT EXAM (CBT)
 // ============================================================
 function StudentExam({ data, onFinish }) {
   const { ujian, siswa } = data;
-  // Acak soal dan opsi saat komponen pertama kali dimuat
-  const [soal] = useState(() => shuffleSoalDanOpsi(ujian.soal));
-  const [current, setCurrent] = useState(0);
-  const [jawaban, setJawaban] = useState(Array(soal.length).fill(null));
-  const [timeLeft, setTimeLeft] = useState(ujian.durasi * 60);
+  // Kunci sesi unik per (kode ujian + nama + kelas) untuk simpan/pulihkan progres
+  const sesiKey = `cbt_sesi_${ujian.key || ujian.id}_${(siswa.nama || "").trim()}_${siswa.kelas || ""}`
+    .replace(/\s+/g, "_").toLowerCase();
+  // Pulihkan sesi tersimpan (jika HP mati / situs tertutup lalu dibuka lagi)
+  const [restored] = useState(() => {
+    if (useDemo) return null;
+    try {
+      const raw = localStorage.getItem(sesiKey);
+      if (!raw) return null;
+      const s = JSON.parse(raw);
+      if (s && Array.isArray(s.soal) && s.soal.length && Array.isArray(s.jawaban) && s.deadline) return s;
+      return null;
+    } catch { return null; }
+  });
+  // Acak soal saat pertama dimuat; kalau memulihkan, pakai urutan yang sudah tersimpan
+  const [soal] = useState(() => (restored && restored.soal.length) ? restored.soal : shuffleSoalDanOpsi(ujian.soal));
+  // Deadline absolut (jam mulai + durasi). Refresh/restart TIDAK mereset sisa waktu.
+  const deadlineRef = useRef((restored && restored.deadline) ? restored.deadline : (Date.now() + ujian.durasi * 60 * 1000));
+  const [current, setCurrent] = useState((restored && Number.isInteger(restored.current)) ? restored.current : 0);
+  const [jawaban, setJawaban] = useState(() =>
+    (restored && restored.jawaban.length === soal.length) ? restored.jawaban : Array(soal.length).fill(null)
+  );
+  const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000)));
+  const [resumed, setResumed] = useState(!!restored);
   const [showConfirm, setShowConfirm] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -3608,14 +3831,23 @@ function StudentExam({ data, onFinish }) {
     };
   }, []);
 
-  // ── Timer (pause saat layar mati) ──────────────────────────
+  // ── Simpan progres ke localStorage tiap perubahan (untuk resume saat HP mati) ──
+  useEffect(() => {
+    if (useDemo) return;
+    try {
+      localStorage.setItem(sesiKey, JSON.stringify({
+        soal, jawaban, current, deadline: deadlineRef.current,
+      }));
+    } catch {}
+  }, [jawaban, current, soal, sesiKey]);
+
+  // ── Timer berbasis deadline absolut (anti reset via refresh) ──────────
   useEffect(() => {
     if (locked || submitting || timerPaused) return;
     const t = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) { clearInterval(t); handleSubmit(true); return 0; }
-        return prev - 1;
-      });
+      const sisa = Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000));
+      setTimeLeft(sisa);
+      if (sisa <= 0) { clearInterval(t); handleSubmit(true); }
     }, 1000);
     return () => clearInterval(t);
   }, [locked, submitting, timerPaused]);
@@ -3779,6 +4011,9 @@ function StudentExam({ data, onFinish }) {
       }
     }
 
+    // Sesi selesai — hapus progres tersimpan agar tidak memulihkan ujian yang sudah dikumpulkan
+    try { localStorage.removeItem(sesiKey); } catch {}
+
     if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
     onFinish({ ...hasilData, kkm: ujian.kkm || 75 });
   }, [jawaban, soal, siswa, ujian, onFinish, tabViolation, submitting]);
@@ -3879,6 +4114,13 @@ function StudentExam({ data, onFinish }) {
 
   return (
     <div className="cbt-wrap" style={{userSelect:"none"}}>
+      {/* Banner pemulihan sesi */}
+      {resumed && (
+        <div style={{position:"fixed",top:0,left:0,right:0,zIndex:9998,background:"var(--green2)",color:"white",padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:"12px",fontSize:"13px",fontWeight:"600",boxShadow:"0 2px 8px rgba(0,0,0,0.2)"}}>
+          <span>✅ Ujian dilanjutkan dari progres terakhir Anda. Jawaban dan sisa waktu tetap tersimpan.</span>
+          <button onClick={() => setResumed(false)} style={{background:"rgba(255,255,255,0.25)",border:"none",color:"white",borderRadius:"6px",padding:"4px 10px",cursor:"pointer",fontWeight:"700"}}>Mengerti</button>
+        </div>
+      )}
       {/* Warning overlay */}
       {showWarning && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
@@ -3899,7 +4141,7 @@ function StudentExam({ data, onFinish }) {
       )}
 
       <div className="cbt-header">
-        <h2>📝 {ujian.mapel} — Kelas {ujian.kelas}</h2>
+        <h2>📝 {ujian.mapel} — Tingkat {ujian.kelas}</h2>
         <div className="cbt-header-info">
           <div className="cbt-student-info">👤 {siswa.nama} ({siswa.kelas})</div>
           {tabViolation > 0 && (
