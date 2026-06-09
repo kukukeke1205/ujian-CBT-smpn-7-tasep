@@ -3733,6 +3733,12 @@ function StudentExam({ data, onFinish }) {
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000)));
   const [resumed, setResumed] = useState(!!restored);
   const [showStartWarn, setShowStartWarn] = useState(!restored && !useDemo);
+  // Jembatan ke aplikasi Android (kiosk): kunci layar HANYA selama mengerjakan ujian.
+  // Aman diabaikan di web/iPhone karena KioskBridge tidak ada.
+  useEffect(() => {
+    try { window.KioskBridge && window.KioskBridge.startLock && window.KioskBridge.startLock(); } catch {}
+    return () => { try { window.KioskBridge && window.KioskBridge.stopLock && window.KioskBridge.stopLock(); } catch {} };
+  }, []);
   const [showConfirm, setShowConfirm] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -4109,6 +4115,8 @@ function StudentExam({ data, onFinish }) {
 
     // Sesi selesai — hapus progres tersimpan agar tidak memulihkan ujian yang sudah dikumpulkan
     try { localStorage.removeItem(sesiKey); } catch {}
+    // Buka kunci aplikasi Android (kiosk) setelah ujian dikumpulkan
+    try { window.KioskBridge && window.KioskBridge.stopLock && window.KioskBridge.stopLock(); } catch {}
 
     if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
     onFinish({ ...hasilData, kkm: ujian.kkm || 75 });
