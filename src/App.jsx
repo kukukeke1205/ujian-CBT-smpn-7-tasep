@@ -510,6 +510,24 @@ async function supabase(path, options = {}) {
   return text ? JSON.parse(text) : [];
 }
 
+// Ambil SEMUA baris dengan pagination (atasi batas 1000 baris Supabase/PostgREST).
+// Mengulang permintaan per 1000 baris sampai habis. Wajib ada "order=" di path
+// agar urutan halaman stabil.
+async function supabaseAll(path, chunk = 1000) {
+  let semua = [];
+  let from = 0;
+  // Batas aman 100x putaran (100 ribu baris) untuk mencegah loop tak berujung
+  for (let i = 0; i < 100; i++) {
+    const sep = path.includes("?") ? "&" : "?";
+    const page = await supabase(`${path}${sep}limit=${chunk}&offset=${from}`);
+    if (!Array.isArray(page) || page.length === 0) break;
+    semua = semua.concat(page);
+    if (page.length < chunk) break;
+    from += chunk;
+  }
+  return semua;
+}
+
 // ============================================================
 // UPLOAD GAMBAR KE SUPABASE STORAGE
 // Nama bucket: "gambar-soal" (harus dibuat dulu di Supabase, lihat panduan)
@@ -1278,8 +1296,8 @@ function GuruDashboard({ guru, onLogout }) {
         // Load ujian, soal, dan hasil sekaligus
         const [ujianRaw, soalRaw, hasilRaw, siswaRaw] = await Promise.all([
           supabase("ujian?deleted_at=is.null&order=id.desc"),
-          supabase("soal?order=ujian_id.asc,id.asc"),
-          supabase("hasil?order=id.desc"),
+          supabaseAll("soal?order=ujian_id.asc,id.asc"),
+          supabaseAll("hasil?order=id.desc"),
           supabase("siswa?order=kelas.asc,nama.asc").catch(() => []),
         ]);
         setSiswaList(Array.isArray(siswaRaw) ? siswaRaw : []);
@@ -2880,7 +2898,7 @@ function MonitorPage({ ujianList }) {
     try {
       if (!useDemo) {
         // Ambil hasil submit
-        const dataHasil = await supabase("hasil?order=id.desc");
+        const dataHasil = await supabaseAll("hasil?order=id.desc");
         setHasilLive(dataHasil);
         // Ambil peserta yang sedang aktif ujian
         // Hanya ambil yang heartbeat < 60 detik (yang lebih lama dianggap putus)
