@@ -1083,6 +1083,7 @@ export default function App() {
             <StudentExam
               data={studentData}
               onFinish={(result) => { setExamResult(result); setScreen("result"); }}
+              onForceLogout={() => { setStudentData(null); setScreen("login"); }}
             />
           </ErrorBoundary>
         )}
@@ -1479,7 +1480,7 @@ function UjianPage({ ujianList, onRefresh }) {
   const [showForm, setShowForm] = useState(false);
   const [showKey, setShowKey] = useState(null);
   const [editUjian, setEditUjian] = useState(null); // ujian yang sedang diedit
-  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "" });
+  const [form, setForm] = useState({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "", ketat: false });
   const [saving, setSaving] = useState(false);
   const [confirmHapus, setConfirmHapus] = useState(null); // ujian yang akan dihapus
   const [showRecycleBin, setShowRecycleBin] = useState(false);
@@ -1517,7 +1518,7 @@ function UjianPage({ ujianList, onRefresh }) {
   };
 
   const resetForm = () => {
-    setForm({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "" });
+    setForm({ mapel: MAPEL[0], kelas: "", durasi: 60, kkm: 75, jam_buka: "", jam_tutup: "", ketat: false });
     setEditUjian(null);
     setShowForm(false);
   };
@@ -1529,7 +1530,7 @@ function UjianPage({ ujianList, onRefresh }) {
       if (useDemo) {
         DEMO_UJIAN.push({ ...form, durasi: Number(form.durasi), key: genKey(), aktif: true, soal: [], id: Date.now() });
       } else {
-        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, key: genKey(), aktif: true, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
+        await supabase("ujian", { method: "POST", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, key: genKey(), aktif: true, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null, ketat: !!form.ketat }) });
       }
       await onRefresh();
       resetForm();
@@ -1545,7 +1546,7 @@ function UjianPage({ ujianList, onRefresh }) {
         const idx = DEMO_UJIAN.findIndex(u => u.id === editUjian.id);
         if (idx > -1) DEMO_UJIAN[idx] = { ...DEMO_UJIAN[idx], mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null };
       } else {
-        await supabase(`ujian?id=eq.${editUjian.id}`, { method: "PATCH", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null }) });
+        await supabase(`ujian?id=eq.${editUjian.id}`, { method: "PATCH", body: JSON.stringify({ mapel: form.mapel, kelas: form.kelas, durasi: Number(form.durasi), kkm: Number(form.kkm) || 75, jam_buka: form.jam_buka || null, jam_tutup: form.jam_tutup || null, ketat: !!form.ketat }) });
       }
       await onRefresh();
       resetForm();
@@ -1637,7 +1638,7 @@ function UjianPage({ ujianList, onRefresh }) {
   const bukaFormEdit = (ujian) => {
     if (ujian.terkunci) return alert("🔒 Ujian ini dikunci. Buka kunci dulu sebelum mengedit.");
     setEditUjian(ujian);
-    setForm({ mapel: ujian.mapel, kelas: ujian.kelas, durasi: ujian.durasi, kkm: ujian.kkm || 75, jam_buka: ujian.jam_buka || "", jam_tutup: ujian.jam_tutup || "" });
+    setForm({ mapel: ujian.mapel, kelas: ujian.kelas, durasi: ujian.durasi, kkm: ujian.kkm || 75, jam_buka: ujian.jam_buka || "", jam_tutup: ujian.jam_tutup || "", ketat: !!ujian.ketat });
     setShowForm(true);
     window.scrollTo(0, 0);
   };
@@ -1711,6 +1712,10 @@ function UjianPage({ ujianList, onRefresh }) {
             <div style={{background:"rgba(255,255,255,0.7)", borderRadius:"8px", padding:"10px 14px", fontSize:"12px", marginBottom:"16px", color:"#92400e"}}>
               💡 Jam Buka/Tutup opsional. Kosongkan jika tidak perlu jadwal otomatis.
             </div>
+            <label style={{display:"flex", alignItems:"flex-start", gap:"10px", background:"rgba(239,68,68,0.06)", border:"1px solid rgba(239,68,68,0.3)", borderRadius:"8px", padding:"12px 14px", marginBottom:"16px", cursor:"pointer"}}>
+              <input type="checkbox" checked={!!form.ketat} onChange={e=>setForm(p=>({...p, ketat:e.target.checked}))} style={{marginTop:"3px"}} />
+              <span style={{fontSize:"13px", color:"#991b1b"}}><strong>🔒 Mode Ketat</strong> — jika siswa keluar dari aplikasi/tab saat ujian, sesi otomatis berakhir: harus login ulang dan mulai dari awal. <em>Catatan: fitur "lanjutkan saat HP mati" dimatikan untuk ujian ini.</em></span>
+            </label>
             <div style={{display:"flex", gap:"8px"}}>
               <button className="btn btn-green" onClick={editUjian ? handleEdit : handleCreate} disabled={saving}>
                 {saving ? "Menyimpan..." : editUjian ? "💾 Simpan Perubahan" : "✅ Buat Ujian"}
@@ -3706,7 +3711,7 @@ function SiswaPage({ siswaList, onRefresh }) {
 // ============================================================
 // STUDENT EXAM (CBT)
 // ============================================================
-function StudentExam({ data, onFinish }) {
+function StudentExam({ data, onFinish, onForceLogout }) {
   const { ujian, siswa } = data;
   // Kunci sesi unik per (kode ujian + nama + kelas) untuk simpan/pulihkan progres
   const sesiKey = `cbt_sesi_${ujian.key || ujian.id}_${siswa.nis || ""}_${(siswa.nama || "").trim()}_${siswa.kelas || ""}`
@@ -3857,6 +3862,12 @@ function StudentExam({ data, onFinish }) {
   useEffect(() => {
     const onVisibility = () => {
       if (document.hidden && !submitting) {
+        // MODE KETAT: keluar dari aplikasi/tab saat ujian = sesi berakhir, login ulang dari awal
+        if (ujian.ketat && !showStartWarn) {
+          try { localStorage.removeItem(sesiKey); } catch {}
+          try { onForceLogout && onForceLogout(); } catch {}
+          return;
+        }
         // Layar mulai gelap / tab disembunyikan
         hiddenSinceRef.current = Date.now();
         setTimerPaused(true); // pause timer dulu
