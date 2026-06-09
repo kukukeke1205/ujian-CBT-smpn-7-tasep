@@ -534,6 +534,10 @@ async function supabaseAll(path, chunk = 1000) {
 // ============================================================
 const STORAGE_BUCKET = "gambar-soal";
 
+// Isi URL unduhan APK aplikasi Android di sini setelah aplikasi selesai dibuat.
+// Selama masih "", banner hanya memberi info dan siswa Android tetap bisa lewat web.
+const APK_URL = "";
+
 async function uploadGambar(file, onProgress) {
   if (!file) throw new Error("Tidak ada file dipilih");
 
@@ -1095,7 +1099,7 @@ export default function App() {
 // ============================================================
 function LoginScreen({ onGuruLogin, onStudentJoin }) {
   const [tab, setTab] = useState("siswa");
-  const [form, setForm] = useState({ username: "", password: "", nama: "", kelas: "", examKey: "" });
+  const [form, setForm] = useState({ username: "", password: "", nama: "", kelas: "", examKey: "", nis: "", sandi: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPass, setShowPass] = useState(false);
@@ -1122,6 +1126,8 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
       setForm(p => ({ ...p, kelas: rosterMatch.kelas }));
     }
   }, [rosterMatch]);
+  // Mode akun aktif jika sudah ada siswa yang punya NIS + password
+  const akunAktif = siswaList.some(s => s.nis && s.password);
 
   const handleGuru = async () => {
     setError("");
@@ -1132,11 +1138,22 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
 
   const handleSiswa = async () => {
     setError("");
-    if (!form.nama.trim()) return setError("Nama tidak boleh kosong.");
-    if (!form.kelas.trim()) return setError("Silakan pilih kelas Anda.");
     if (!form.examKey.trim()) return setError("Kode ujian tidak boleh kosong.");
+    let siswaFinal = { nama: form.nama.trim(), kelas: form.kelas, nis: null };
+    if (akunAktif) {
+      if (!form.nis.trim() || !form.sandi.trim()) return setError("NIS dan password wajib diisi.");
+    } else {
+      if (!form.nama.trim()) return setError("Nama tidak boleh kosong.");
+      if (!form.kelas.trim()) return setError("Silakan pilih kelas Anda.");
+    }
     setLoading(true);
     try {
+      // Mode akun: verifikasi NIS + password ke tabel siswa
+      if (akunAktif && !useDemo) {
+        const akun = await supabase(`siswa?nis=eq.${encodeURIComponent(form.nis.trim())}&password=eq.${encodeURIComponent(form.sandi.trim())}`);
+        if (!akun || akun.length === 0) { setLoading(false); return setError("NIS atau password salah."); }
+        siswaFinal = { nama: akun[0].nama, kelas: akun[0].kelas, nis: akun[0].nis };
+      }
       let ujian;
       if (useDemo) {
         ujian = DEMO_UJIAN.find(u => u.key.toUpperCase() === form.examKey.toUpperCase() && u.aktif);
@@ -1172,7 +1189,12 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
             return setError(`⏰ Waktu ujian sudah berakhir pukul ${ujian.jam_tutup}.`);
           }
         }
-        onStudentJoin({ ujian, siswa: { nama: form.nama, kelas: form.kelas } });
+        // Kunci satu kali kerja per akun per ujian
+        if (akunAktif && !useDemo) {
+          const sudah = await supabase(`hasil?ujian_id=eq.${ujian.id}&nis=eq.${encodeURIComponent(siswaFinal.nis)}&select=id`);
+          if (sudah && sudah.length > 0) { setLoading(false); return setError("⛔ Anda sudah mengerjakan ujian ini. Tidak bisa mengulang."); }
+        }
+        onStudentJoin({ ujian, siswa: siswaFinal });
       }
     } catch (e) {
       console.error("Error login siswa:", e);
@@ -1196,6 +1218,20 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
         {error && <div className="error-msg">⚠️ {error}</div>}
         {tab === "siswa" ? (
           <>
+            {/^android/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "") && (
+              <div style={{background:"rgba(34,197,94,0.12)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:"var(--radius2)",padding:"12px 14px",marginBottom:"14px"}}>
+                <div style={{fontSize:"13px",fontWeight:"700",color:"#16a34a",marginBottom:APK_URL?"8px":"4px"}}>📱 Pengguna Android disarankan memakai Aplikasi Ujian</div>
+                <div style={{fontSize:"12px",color:"rgba(255,255,255,0.6)",marginBottom:APK_URL?"10px":"0"}}>Aplikasi mengunci layar agar lebih aman saat ujian.{APK_URL?"":" (Aplikasi sedang disiapkan — sementara silakan lanjut lewat web di bawah.)"}</div>
+                {APK_URL && <a href={APK_URL} className="btn btn-green" style={{display:"inline-block",fontSize:"13px",textDecoration:"none"}}>⬇️ Unduh Aplikasi Ujian (Android)</a>}
+              </div>
+            )}
+            {akunAktif ? (
+            <>
+            <div className="field"><label>NIS</label><input placeholder="Nomor Induk Siswa" value={form.nis} onChange={e=>setForm(p=>({...p,nis:e.target.value}))} autoComplete="off" /></div>
+            <div className="field"><label>Password</label><input type="password" placeholder="Password dari guru" value={form.sandi} onChange={e=>setForm(p=>({...p,sandi:e.target.value}))} autoComplete="off" onKeyDown={e=>{if(e.key==='Enter')handleSiswa();}} /></div>
+            </>
+            ) : (
+            <>
             <div className="field">
               <label>Nama Lengkap</label>
               <input list="rosterNama" placeholder={siswaList.length ? "Ketik / pilih nama Anda" : "Nama lengkap Anda"} value={form.nama} onChange={e => setForm(p => ({...p, nama: e.target.value}))} autoComplete="off" />
@@ -1235,6 +1271,8 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
                 </select>
                 {siswaList.length > 0 && <div style={{fontSize:"11px",color:"rgba(255,255,255,0.45)",marginTop:"4px"}}>Nama tidak ditemukan di daftar — pilih kelas manual.</div>}
               </div>
+            )}
+            </>
             )}
             <div className="field"><label>Kode Ujian</label><input placeholder="Masukkan kode dari guru" value={form.examKey} onChange={e => setForm(p => ({...p, examKey: e.target.value.toUpperCase()}))} style={{letterSpacing:"3px", fontFamily:"var(--mono)", fontWeight:"700"}} /></div>
             <button className="btn-primary" onClick={handleSiswa} disabled={loading}>{loading ? "Memuat..." : "🚀 Mulai Ujian"}</button>
@@ -3540,6 +3578,41 @@ function SiswaPage({ siswaList, onRefresh }) {
     } catch(e) { alert("Gagal menghapus: " + e.message); }
   };
 
+  // Buatkan NIS + password untuk siswa yang belum punya akun
+  const genAkun = async () => {
+    if (useDemo) return alert("Mode demo: tidak tersimpan.");
+    const belum = siswaList.filter(s => !s.nis || !s.password);
+    if (belum.length === 0) return alert("Semua siswa sudah punya akun (NIS & password).");
+    if (!window.confirm(`Buatkan NIS & password otomatis untuk ${belum.length} siswa yang belum punya akun?\n\nSetelah selesai, klik "Unduh Daftar Akun" untuk dicetak & dibagikan.`)) return;
+    const dipakai = new Set(siswaList.map(s => s.nis).filter(Boolean));
+    const PWCHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    setSaving(true);
+    try {
+      let n = 0;
+      for (const s of belum) {
+        let nis = s.nis;
+        if (!nis) { do { nis = String(Math.floor(1000 + Math.random()*9000)); } while (dipakai.has(nis)); dipakai.add(nis); }
+        const pw = s.password || Array.from({length:5}, () => PWCHARS[Math.floor(Math.random()*PWCHARS.length)]).join("");
+        await supabase(`siswa?id=eq.${s.id}`, { method: "PATCH", body: JSON.stringify({ nis, password: pw }) });
+        n++;
+      }
+      await onRefresh();
+      setStatus(`✅ ${n} akun dibuat. Klik "Unduh Daftar Akun" untuk cetak & bagikan.`);
+    } catch(e) { alert("Gagal membuat akun: " + e.message); }
+    setSaving(false);
+  };
+
+  // Unduh daftar akun (CSV) untuk dicetak per kelas
+  const unduhAkun = () => {
+    const rows = [["Nama","Kelas","NIS","Password"], ...siswaList.map(s => [s.nama, s.kelas, s.nis||"", s.password||""])];
+    const csv = "\ufeff" + rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(";")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "daftar_akun_siswa.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const tanpaAkun = siswaList.filter(s => !s.nis || !s.password).length;
+
   const filtered = siswaList.filter(s =>
     (!filterKelas || s.kelas === filterKelas) &&
     (!search || (s.nama||"").toLowerCase().includes(search.toLowerCase()))
@@ -3592,8 +3665,10 @@ function SiswaPage({ siswaList, onRefresh }) {
 
       <div className="card">
         <div className="card-header" style={{display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:"8px"}}>
-          <h2>Daftar Siswa ({siswaList.length})</h2>
+          <h2>Daftar Siswa ({siswaList.length}) {tanpaAkun>0 && <span style={{fontSize:"12px",color:"#b45309",fontWeight:"600"}}>• {tanpaAkun} belum punya akun</span>}</h2>
           <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+            <button className="btn btn-green" style={{fontSize:"13px"}} onClick={genAkun} disabled={saving}>🔑 Buatkan Akun Otomatis</button>
+            <button className="btn btn-blue" style={{fontSize:"13px"}} onClick={unduhAkun}>📥 Unduh Daftar Akun</button>
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Cari nama..." style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}} />
             <select value={filterKelas} onChange={e => setFilterKelas(e.target.value)} style={{padding:"8px 12px", borderRadius:"var(--radius2)", border:"1.5px solid var(--border)", fontSize:"13px"}}>
               <option value="">Semua kelas</option>
@@ -3606,17 +3681,19 @@ function SiswaPage({ siswaList, onRefresh }) {
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>#</th><th>Nama</th><th>Kelas</th><th></th></tr></thead>
+              <thead><tr><th>#</th><th>Nama</th><th>Kelas</th><th>NIS</th><th>Password</th><th></th></tr></thead>
               <tbody>
                 {filtered.map((s,i) => (
                   <tr key={s.id}>
                     <td style={{color:"var(--gray)", fontSize:"12px"}}>{i+1}</td>
                     <td>{s.nama}</td>
                     <td><span className="badge badge-blue">{s.kelas}</span></td>
+                    <td style={{fontFamily:"var(--mono)",fontSize:"13px"}}>{s.nis||"—"}</td>
+                    <td style={{fontFamily:"var(--mono)",fontSize:"13px",fontWeight:"700"}}>{s.password||"—"}</td>
                     <td style={{textAlign:"right"}}><button className="btn btn-red" style={{fontSize:"12px", padding:"4px 10px"}} onClick={() => hapusSatu(s)}>🗑️</button></td>
                   </tr>
                 ))}
-                {filtered.length === 0 && <tr><td colSpan={4} style={{textAlign:"center", color:"var(--gray)", padding:"16px"}}>Tidak ada yang cocok.</td></tr>}
+                {filtered.length === 0 && <tr><td colSpan={6} style={{textAlign:"center", color:"var(--gray)", padding:"16px"}}>Tidak ada yang cocok.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -3632,7 +3709,7 @@ function SiswaPage({ siswaList, onRefresh }) {
 function StudentExam({ data, onFinish }) {
   const { ujian, siswa } = data;
   // Kunci sesi unik per (kode ujian + nama + kelas) untuk simpan/pulihkan progres
-  const sesiKey = `cbt_sesi_${ujian.key || ujian.id}_${(siswa.nama || "").trim()}_${siswa.kelas || ""}`
+  const sesiKey = `cbt_sesi_${ujian.key || ujian.id}_${siswa.nis || ""}_${(siswa.nama || "").trim()}_${siswa.kelas || ""}`
     .replace(/\s+/g, "_").toLowerCase();
   // Pulihkan sesi tersimpan (jika HP mati / situs tertutup lalu dibuka lagi)
   const [restored] = useState(() => {
@@ -3655,6 +3732,7 @@ function StudentExam({ data, onFinish }) {
   );
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000)));
   const [resumed, setResumed] = useState(!!restored);
+  const [showStartWarn, setShowStartWarn] = useState(!restored && !useDemo);
   const [showConfirm, setShowConfirm] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -3672,10 +3750,10 @@ function StudentExam({ data, onFinish }) {
   const wakeLockRef = useRef(null); // Wake Lock sentinel untuk paksa layar tetap nyala
   const [wakeLockAktif, setWakeLockAktif] = useState(false); // status wake lock untuk UI
   // Threshold bertingkat untuk membedakan screen timeout HP vs cheating
-  const ABAIKAN_MS = 30000;        // < 30 detik = diabaikan (screen timeout normal)
-  const WARNING_MS = 90000;        // 30-90 detik = warning (log saja, tidak hitung pelanggaran)
+  const ABAIKAN_MS = 10000;        // < 30 detik = diabaikan (screen timeout normal)
+  const WARNING_MS = 30000;        // 30-90 detik = warning (log saja, tidak hitung pelanggaran)
                                    // > 90 detik = pelanggaran (hitung +1)
-  const MAX_VIOLATIONS = 3;
+  const MAX_VIOLATIONS = 2;
 
   // ── Fullscreen ──────────────────────────────────────────────
   const enterFullscreen = () => {
@@ -3982,7 +4060,7 @@ function StudentExam({ data, onFinish }) {
     const benar = soal.filter((s, i) => jawaban[i] === s.jawaban).length;
     const nilai = Math.round((benar / soal.length) * 100);
     const hasilData = {
-      nama_siswa: siswa.nama, kelas: siswa.kelas, mapel: ujian.mapel,
+      nama_siswa: siswa.nama, kelas: siswa.kelas, nis: siswa.nis || null, mapel: ujian.mapel,
       benar, total: soal.length, nilai, ujian_id: ujian.id,
       pelanggaran: tabViolation,
       mencurigakan: tabViolation >= 2,
@@ -4132,6 +4210,22 @@ function StudentExam({ data, onFinish }) {
 
   return (
     <div className="cbt-wrap" style={{userSelect:"none"}}>
+      {/* Peringatan tegas sebelum mulai */}
+      {showStartWarn && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",zIndex:10000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
+          <div style={{background:"white",borderRadius:"16px",padding:"28px",maxWidth:"440px"}}>
+            <div style={{fontSize:"44px",textAlign:"center",marginBottom:"8px"}}>⚠️</div>
+            <h2 style={{fontSize:"18px",fontWeight:"800",textAlign:"center",marginBottom:"14px",color:"var(--red2)"}}>Tata Tertib Ujian</h2>
+            <ul style={{fontSize:"14px",color:"#374151",lineHeight:"1.7",paddingLeft:"18px",marginBottom:"18px"}}>
+              <li><strong>Dilarang keluar dari layar ujian</strong> (pindah aplikasi/tab, buka browser/AI lain).</li>
+              <li>Setiap kali keluar layar <strong>tercatat otomatis</strong> oleh sistem dan terlihat oleh guru.</li>
+              <li>Keluar layar <strong>{MAX_VIOLATIONS}× akan mengunci ujian Anda</strong> dan dapat menggugurkan nilai.</li>
+              <li>Tetap dalam mode layar penuh sampai ujian selesai.</li>
+            </ul>
+            <button className="btn btn-blue" style={{width:"100%",padding:"12px",fontWeight:"700"}} onClick={() => { setShowStartWarn(false); enterFullscreen(); }}>Saya Mengerti & Mulai Ujian</button>
+          </div>
+        </div>
+      )}
       {/* Banner pemulihan sesi */}
       {resumed && (
         <div style={{position:"fixed",top:0,left:0,right:0,zIndex:9998,background:"var(--green2)",color:"white",padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:"12px",fontSize:"13px",fontWeight:"600",boxShadow:"0 2px 8px rgba(0,0,0,0.2)"}}>
