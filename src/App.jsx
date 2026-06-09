@@ -536,7 +536,7 @@ const STORAGE_BUCKET = "gambar-soal";
 
 // Isi URL unduhan APK aplikasi Android di sini setelah aplikasi selesai dibuat.
 // Selama masih "", banner hanya memberi info dan siswa Android tetap bisa lewat web.
-const APK_URL = "https://drive.google.com/file/d/16kZ1z2tEcLK6uXgJ2dk--8sD4vHVJKdt/view?usp=sharing";
+const APK_URL = "";
 
 async function uploadGambar(file, onProgress) {
   if (!file) throw new Error("Tidak ada file dipilih");
@@ -1219,7 +1219,7 @@ function LoginScreen({ onGuruLogin, onStudentJoin }) {
         {error && <div className="error-msg">⚠️ {error}</div>}
         {tab === "siswa" ? (
           <>
-            {/^android/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "") && (
+            {/android/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "") && (
               <div style={{background:"rgba(34,197,94,0.12)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:"var(--radius2)",padding:"12px 14px",marginBottom:"14px"}}>
                 <div style={{fontSize:"13px",fontWeight:"700",color:"#16a34a",marginBottom:APK_URL?"8px":"4px"}}>📱 Pengguna Android disarankan memakai Aplikasi Ujian</div>
                 <div style={{fontSize:"12px",color:"rgba(255,255,255,0.6)",marginBottom:APK_URL?"10px":"0"}}>Aplikasi mengunci layar agar lebih aman saat ujian.{APK_URL?"":" (Aplikasi sedang disiapkan — sementara silakan lanjut lewat web di bawah.)"}</div>
