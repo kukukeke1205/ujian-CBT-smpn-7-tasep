@@ -3744,6 +3744,17 @@ function StudentExam({ data, onFinish, onForceLogout }) {
     try { window.KioskBridge && window.KioskBridge.startLock && window.KioskBridge.startLock(); } catch {}
     return () => { try { window.KioskBridge && window.KioskBridge.stopLock && window.KioskBridge.stopLock(); } catch {} };
   }, []);
+  // MODE KETAT (untuk aplikasi Android): saluran yang dipanggil aplikasi saat siswa
+  // meminimize/keluar aplikasi (lewat onUserLeaveHint). WebView tidak selalu memicu
+  // 'visibilitychange', jadi aplikasi yang memberi tahu lewat fungsi global ini.
+  useEffect(() => {
+    if (!ujian.ketat) return;
+    window.__cbtOnLeave = () => {
+      try { localStorage.removeItem(sesiKey); } catch {}
+      try { onForceLogout && onForceLogout(); } catch {}
+    };
+    return () => { try { delete window.__cbtOnLeave; } catch {} };
+  }, [ujian.ketat]);
   const [showConfirm, setShowConfirm] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
