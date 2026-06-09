@@ -536,7 +536,7 @@ const STORAGE_BUCKET = "gambar-soal";
 
 // Isi URL unduhan APK aplikasi Android di sini setelah aplikasi selesai dibuat.
 // Selama masih "", banner hanya memberi info dan siswa Android tetap bisa lewat web.
-const APK_URL = "";
+const APK_URL = "https://drive.google.com/file/d/16kZ1z2tEcLK6uXgJ2dk--8sD4vHVJKdt/view?usp=sharing";
 
 async function uploadGambar(file, onProgress) {
   if (!file) throw new Error("Tidak ada file dipilih");
